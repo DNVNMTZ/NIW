@@ -325,6 +325,9 @@ button.tile{cursor:pointer;font:inherit}
 .today-row .tr-main small{color:var(--muted);font-size:12px}
 .today-row .tr-amt{font-size:14px;white-space:nowrap}
 .kind-select{margin-top:6px;padding:6px 28px 6px 12px;border-radius:999px;font-size:12.5px;min-height:0;width:auto;max-width:100%}
+.ledger tr.ledger-open td{background:var(--surface-2)}
+tr.ledger-row{cursor:pointer}tr.ledger-row:hover td{background:var(--surface-2)}
+.res-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:16px}
 .done-movs{margin-top:8px;display:flex;flex-direction:column;gap:4px}
 .done-mov{display:flex;align-items:center;gap:10px;font-size:13px}.done-mov span{flex:1;color:var(--muted)}
 .sheet-violet{background:var(--violet);border-radius:var(--r-xl);padding:22px;color:#fff}
@@ -1082,6 +1085,48 @@ const Calc = {
     return d.accounts.map(x => ({ acc: x, open: open[x.id] || 0, inflow: r2(flow[x.id].inflow), outflow: r2(flow[x.id].outflow), close: close[x.id] || 0 }));
   },
 
+  /* --- Estado de cuenta (solo lo pagado/cobrado real) --- */
+  resRange(per, date) {
+    date = isDate(date) ? date : today();
+    if (per === 'semana') { const a = this.weekStartOf(date); return { a, b: addDays(a, 6) }; }
+    if (per === 'quincena') { const p = this.periodOf(date); return { a: p.start, b: p.end, q: p.q }; }
+    const a = monthStart(date); return { a, b: monthEnd(a) };
+  },
+  // Movimientos con efecto en una cuenta o tarjeta: ref = 'acc|id' o 'debt|id'
+  ledger(ref, a, b) {
+    const [t, id] = String(ref).split('|'), d = D(), isDebt = t === 'debt';
+    const effOf = m => {
+      if (isDebt) {
+        if ((m.type === 'gasto' || m.type === 'transferencia') && m.creditDebtId === id) return m.amount;     // cargo: la deuda sube
+        if (m.type === 'pago_deuda' && m.debtId === id) return -m.amount;                                     // pago: la deuda baja
+        return 0;
+      }
+      return sum(this.effects(m).filter(([acc]) => acc === id), x => x[1]);
+    };
+    const rel = d.movements.filter(m => effOf(m) !== 0);
+    let open;
+    if (isDebt) { const db = d.debts.find(x => x.id === id); open = (Number(db && db.baseBalance) || 0) + sum(rel.filter(m => m.date < a && (this.isReal(m) || effOf(m) > 0)), effOf); }
+    else open = this.balances(addDays(a, -1))[id] || 0;
+    open = r2(open);
+    const inRange = rel.filter(m => m.date >= a && m.date <= b).sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : ((x.createdAt || '') < (y.createdAt || '') ? -1 : 1));
+    let bal = open, inn = 0, out = 0;
+    const rows = inRange.filter(m => this.isReal(m) || (isDebt && effOf(m) > 0)).map(m => { const v = effOf(m); bal = r2(bal + v); if (v > 0) inn += v; else out -= v; return { m, inc: v > 0 ? v : 0, exp: v < 0 ? -v : 0, bal }; });
+    const pending = inRange.filter(m => !this.isReal(m) && !(isDebt && effOf(m) > 0)).map(m => ({ m, v: effOf(m) }));
+    return { ref, isDebt, open, rows, pending, inc: r2(inn), exp: r2(out), close: r2(bal) };
+  },
+  ledgerRefs() { const d = D(); return d.accounts.map(x => ({ ref: 'acc|' + x.id, name: x.name, type: ACC_TYPE_LABEL[x.type] || '', liquid: x.type === 'liquida' })).concat(d.debts.map(x => ({ ref: 'debt|' + x.id, name: x.name, type: 'Deuda / tarjeta', debt: true }))); },
+  // Ingresos y egresos reales por categoría (sin traspasos entre cuentas)
+  byCategory(a, b) {
+    const inc = {}, exp = {};
+    this.movementsIn(a, b, m => this.isReal(m) && m.type !== 'transferencia').forEach(m => {
+      const tgt = m.type === 'ingreso' ? inc : exp, k = m.category || (m.type === 'pago_deuda' ? 'Deudas' : 'Otros');
+      tgt[k] = tgt[k] || { category: k, amount: 0, count: 0, card: 0 }; tgt[k].amount += m.amount; tgt[k].count++; if (m.creditDebtId) tgt[k].card += m.amount;
+    });
+    const list = o => Object.values(o).map(x => Object.assign(x, { amount: r2(x.amount), card: r2(x.card) })).sort((x, y) => y.amount - x.amount);
+    const I = list(inc), E = list(exp), ti = r2(sum(I, x => x.amount)), te = r2(sum(E, x => x.amount));
+    return { inc: I, exp: E, totalInc: ti, totalExp: te, net: r2(ti - te) };
+  },
+
   /* --- Deudas --- */
   debtPaid(id, a, b, all) { return sum(D().movements.filter(m => m.type === 'pago_deuda' && m.debtId === id && (all || this.isReal(m)) && (!a || m.date >= a) && (!b || m.date <= b)), m => m.amount); },
   debtCharges(id) { return sum(D().movements.filter(m => (m.type === 'gasto' || m.type === 'transferencia') && m.creditDebtId === id), m => m.amount); },
@@ -1617,8 +1662,12 @@ const Bank = {
     if (c) return c.debtId ? 'debt|' + c.debtId : 'acc|' + c.accountId;
     const snd = (item.senderId && (D().senders || []).find(s => s.id === item.senderId)) || this.senderFor(item.from);
     if (snd && snd.payWith) { const [t, id] = snd.payWith.split('|'); if (t === 'debt' ? Data.get('debts', id) : Data.get('accounts', id)) return snd.payWith; }
-    const tdc = D().debts.find(x => /tdc|tarjeta|cr[eé]dito/i.test(x.name));
-    return tdc ? 'debt|' + tdc.id : 'acc|' + (D().accounts[0] ? D().accounts[0].id : '');
+    // Sin tarjeta ni remitente asociado: solo se va a la tarjeta de crédito si el aviso lo dice; si no, a tu cuenta bancaria principal
+    const txt = (item.subject || '') + ' ' + (item.raw || '');
+    const tdc = /cr[eé]dito|\bTDC\b/i.test(txt) && !/d[eé]bito/i.test(txt) && D().debts.find(x => /tdc|tarjeta|cr[eé]dito/i.test(x.name));
+    if (tdc) return 'debt|' + tdc.id;
+    const bank = D().accounts.find(a => a.type === 'liquida' && a.id !== 'acc_efectivo' && !/efectivo/i.test(a.name)) || D().accounts[0];
+    return 'acc|' + (bank ? bank.id : '');
   },
   // Registra un cargo de la bandeja como movimiento (compra esporádica o cargo recurrente)
   post(item, o) {
@@ -2579,7 +2628,7 @@ const SECTIONS = [
   { id: 'presupuesto', label: 'Presupuesto', icon: 'target', group: 'Planear' },
   { id: 'salidas', label: 'Salidas', icon: 'out', group: 'Planear', tabs: [['recurrentes', 'Gastos recurrentes'], ['deudas', 'Deudas']] },
   { id: 'metas', label: 'Metas', icon: 'flag', group: 'Planear' },
-  { id: 'resumen', label: 'Resumen', icon: 'sum', group: 'Analizar', tabs: [['quincenal', 'Quincenal'], ['semanal', 'Semanal'], ['mensual', 'Mensual']] },
+  { id: 'resumen', label: 'Resumen', icon: 'sum', group: 'Analizar', tabs: [['estado', 'Estado de cuenta'], ['cuentas', 'Por cuenta'], ['categorias', 'Por categoría']] },
   { id: 'calendario', label: 'Calendario', icon: 'cal', group: 'Analizar' },
   { id: 'reportes', label: 'Reportes', icon: 'chart', group: 'Analizar' },
   { id: 'apple', label: 'Apple', icon: 'phone', group: 'Ajustes' },
@@ -2588,11 +2637,12 @@ const SECTIONS = [
 ];
 // Rutas cortas hacia sub-secciones (también aceptan enlaces de versiones anteriores)
 const ROUTES = {
-  flujo: ['resumen', 'quincenal'], quincenal: ['resumen', 'quincenal'], semana: ['resumen', 'semanal'], semanal: ['resumen', 'semanal'], mensual: ['resumen', 'mensual'],
+  flujo: ['resumen', 'cuentas'], quincenal: ['resumen', 'cuentas'], semana: ['resumen', 'categorias'], semanal: ['resumen', 'categorias'], mensual: ['resumen', 'cuentas'], estado: ['resumen', 'estado'],
   recurrentes: ['salidas', 'recurrentes'], deudas: ['salidas', 'deudas'], viaje: ['metas', 'viaje']
 };
 const ui = {
-  section: 'dashboard', tabs: { resumen: 'quincenal', salidas: 'recurrentes', bandeja: 'pendientes' },
+  section: 'dashboard', tabs: { resumen: 'estado', salidas: 'recurrentes', bandeja: 'pendientes' },
+  res: { per: 'mes', date: null, acc: '' },
   weekStart: null, flowStart: null, resMonth: null, calMonth: null, calSel: null,
   dashMonth: null, dashWeek: null, dashCal: 'semana', dashScope: 'total', todayOpen: false,
   budMode: 'mes', budMonth: null, budWeek: null, budFrom: null, budTo: null,
@@ -2707,7 +2757,7 @@ const Views = {
       (ups.length ? ups.map(e => '<div class="list-item"><div class="li-main"><div class="li-title"><span class="dot k-' + e.kind + '"></span> ' + esc(e.title) + '</div><div class="li-sub">' + fmtDateL(e.date) + (e.overdue ? ' · ' + badge('Vencido', 'b-bad') : '') + '</div></div><div class="li-right"><b class="num">' + money(e.amount) + '</b>' + (e.action ? btn(e.action === 'payDebt' ? 'Abonar' : 'Pagar', e.action, { id: e.id, date: e.date }, 'sm') : '') + '</div></div>').join('') : '<div class="empty">Sin pagos pendientes en los próximos 21 días.</div>') + '</div>';
     h += '<div class="card glass"><div class="card-head"><h3>Próxima quincena</h3><span class="sub">' + fmtDateS(nq.start) + ' → ' + fmtDateS(nq.end) + '</span></div><div class="rows">' +
       row('Ingreso esperado', money(nq.income)) + row('Apartados', money(-nq.tot.apart)) + row('Alimentación y partidas', money(-(nq.tot.food + nq.tot.partidas))) + row('Servicios y otros', money(-(nq.tot.services + nq.tot.others))) + row('Metas (pagos y ahorro)', money(-nq.tot.goals)) + row('Deudas', money(-nq.tot.debts)) +
-      '</div><div class="flow-ds ' + (nq.safe < 0 ? 'bad' : '') + '"><span>Disponible seguro planeado</span><span class="v num">' + money(nq.safe) + '</span></div><div class="mt">' + btn('Ver resumen quincenal', 'goto', { target: 'quincenal' }, 'sm ghost') + '</div></div>';
+      '</div><div class="flow-ds ' + (nq.safe < 0 ? 'bad' : '') + '"><span>Disponible seguro planeado</span><span class="v num">' + money(nq.safe) + '</span></div><div class="mt">' + btn('Ver estado de cuenta', 'goto', { target: 'estado' }, 'sm ghost') + '</div></div>';
     h += '</div>';
     // Deudas + metas (hoja violeta)
     const debts = d.debts.map(x => Object.assign({ db: x }, Calc.debtStats(x)));
@@ -2766,18 +2816,65 @@ const Views = {
 
   /* ---------------- RESUMEN (quincenal · semanal · mensual) ---------------- */
   resumen() {
-    const tab = ui.tabs.resumen;
-    const head = '<div class="subnav-wrap">' + Nav.tabs('resumen') + '</div>';
-    return head + (tab === 'semanal' ? this.resSemanal() : tab === 'mensual' ? this.resMensual() : this.resQuincenal());
+    const tab = ['estado', 'cuentas', 'categorias'].includes(ui.tabs.resumen) ? ui.tabs.resumen : (ui.tabs.resumen = 'estado');
+    const per = ui.res.per, r = Calc.resRange(per, ui.res.date || today()), t = today();
+    const label = per === 'semana' ? 'Semana ' + fmtDateS(r.a) + ' – ' + fmtDateS(r.b) : per === 'quincena' ? 'Quincena ' + r.q + ' · ' + fmtDateS(r.a) + ' – ' + fmtDateS(r.b) : fmtMonth(r.a);
+    const cur = t >= r.a && t <= r.b;
+    let h = '<div class="subnav-wrap">' + Nav.tabs('resumen') + '</div>';
+    h += '<div class="section-head"><div><h2 id="resLabel">' + label + (cur ? ' ' + badge('Actual', 'b-teal') : '') + '</h2><p>Solo lo pagado o cobrado real. Los traspasos entre tus cuentas no cuentan como ingreso ni gasto.</p></div></div>';
+    h += '<div class="toolbar res-toolbar"><div class="tabs" role="tablist" aria-label="Periodo">' + [['semana', 'Semana'], ['quincena', 'Quincena'], ['mes', 'Mes']].map(x => '<button type="button" data-action="resPer" data-per="' + x[0] + '" class="' + (per === x[0] ? 'active' : '') + '">' + x[1] + '</button>').join('') + '</div>' +
+      '<div class="pill-input week-picker">' + btn(icon('left'), 'resNav', { dir: '-1' }, 'sm ghost') + '<span class="week-label">' + (per === 'mes' ? fmtMonth(r.a) : fmtDateS(r.a) + ' – ' + fmtDateS(r.b)) + '</span>' + btn(icon('right'), 'resNav', { dir: '1' }, 'sm ghost') + '</div>' + (cur ? '' : btn('Hoy', 'resNav', { dir: '0' }, 'ghost')) + '</div>';
+    return h + (tab === 'cuentas' ? this.resCuentas(r) : tab === 'categorias' ? this.resCategorias(r) : this.resEstado(r));
   },
-  resQuincenal() {
-    const s = D().settings;
-    if (!ui.flowStart) ui.flowStart = Calc.planningStart();
-    let h = '<div class="section-head"><div><h2>Resumen quincenal</h2><p>Cada quincena financia sus compromisos. Los gastos marcados como <b>apartado</b> (renta, luz) se dividen entre las quincenas que los pagan: la quincena del ' + s.q2Day + ' empieza a financiar la renta siguiente.</p></div><div class="actions">' +
-      btn(icon('left'), 'flowNav', { dir: '-1' }, 'sm') + btn('Actual', 'flowNav', { dir: '0' }, 'sm') + btn(icon('right'), 'flowNav', { dir: '1' }, 'sm') + '</div></div>';
-    h += '<div class="card glass"><div class="card-head"><h3>Ajustes rápidos</h3><span class="sub">los cálculos se actualizan al escribir</span></div><div class="inline-fields">' +
-      quickInput('q1Amount', 'Pago quincena 1 (día ' + s.q1Day + ')', s.q1Amount) + quickInput('q2Amount', 'Pago quincena 2 (día ' + s.q2Day + ')', s.q2Amount) + quickInput('food', 'Alimentación semanal (partida base)', Calc.foodWeeklyBase()) + '</div></div>';
-    h += '<div id="flowCards">' + this.flowCards() + '</div>';
+  resEstado(r) {
+    const refs = Calc.ledgerRefs();
+    if (!refs.length) return '<div class="empty">Agrega una cuenta en Configuración.</div>';
+    if (!refs.some(x => x.ref === ui.res.acc)) ui.res.acc = refs[0].ref;
+    const L = Calc.ledger(ui.res.acc, r.a, r.b), info = refs.find(x => x.ref === ui.res.acc), dbt = L.isDebt;
+    const cIn = dbt ? 'Cargos' : 'Ingresos', cOut = dbt ? 'Pagos' : 'Egresos', sal = dbt ? 'Saldo deuda' : 'Saldo';
+    let h = '<div class="card glass"><div class="inline-fields"><label class="field" style="flex:2"><span class="lbl">Cuenta</span><select id="resAcc">' + refs.map(x => '<option value="' + esc(x.ref) + '"' + (x.ref === ui.res.acc ? ' selected' : '') + '>' + esc(x.name) + ' · ' + esc(x.type) + '</option>').join('') + '</select></label></div>' +
+      '<div class="grid g4 mt">' + kpi('Saldo inicial', money(L.open), 'al ' + fmtDateS(addDays(r.a, -1))) + kpi(cIn, (dbt ? '' : '+') + money(L.inc)) + kpi(cOut, '−' + money(L.exp)) + kpi('Saldo final', money(L.close), 'al ' + fmtDateS(r.b), dbt ? (L.close > 0 ? 'warn' : 'ok') : (L.close < 0 ? 'bad' : 'ok')) + '</div></div>';
+    const concept = m => {
+      let c = esc(m.description || m.category || '');
+      const sub = m.type === 'transferencia' ? (m.creditDebtId ? 'Disposición → ' + esc(accName(m.toAccount)) : esc(accName(m.account)) + ' → ' + esc(accName(m.toAccount))) : m.type === 'pago_deuda' ? 'Pago de deuda' + (dbt ? ' desde ' + esc(accName(m.account)) : '') : esc(m.category || '') + (m.creditDebtId && !dbt ? ' · tarjeta' : '');
+      return '<div>' + c + '</div><div class="tiny muted">' + sub + (m.splitId ? ' · parte de un cargo dividido' : '') + '</div>';
+    };
+    h += '<div class="card glass mt"><div class="card-head"><h3>Estado de cuenta · ' + esc(info.name) + '</h3><span class="sub">' + L.rows.length + ' movimientos</span></div><div class="table-wrap"><table class="ledger" id="ledgerTable"><thead><tr><th>Fecha</th><th>Concepto</th><th class="amt">' + cIn + '</th><th class="amt">' + cOut + '</th><th class="amt">' + sal + '</th></tr></thead><tbody>' +
+      '<tr class="ledger-open"><td class="nowrap">' + fmtDateS(r.a) + '</td><td><b>Saldo inicial</b></td><td></td><td></td><td class="amt"><b>' + money(L.open) + '</b></td></tr>' +
+      (L.rows.length ? L.rows.map(x => '<tr data-id="' + esc(x.m.id) + '" data-action="editMovement" class="ledger-row"><td class="nowrap">' + fmtDateS(x.m.date) + '</td><td>' + concept(x.m) + '</td><td class="amt pos">' + (x.inc ? money(x.inc) : '') + '</td><td class="amt">' + (x.exp ? money(x.exp) : '') + '</td><td class="amt' + (!dbt && x.bal < 0 ? ' neg' : '') + '">' + money(x.bal) + '</td></tr>').join('') : '<tr><td colspan="5" class="muted" style="text-align:center;padding:18px">Sin movimientos en el periodo.</td></tr>') +
+      '</tbody><tfoot><tr><td></td><td>Totales y saldo final</td><td class="amt pos">' + money(L.inc) + '</td><td class="amt">' + money(L.exp) + '</td><td class="amt"><b>' + money(L.close) + '</b></td></tr></tfoot></table></div>' +
+      '</div>';
+    // Revisión del saldo: lo que NO está descontando de esta cuenta y por qué
+    if (!dbt) {
+      const accId = ui.res.acc.split('|')[1];
+      const card = D().movements.filter(m => m.date >= r.a && m.date <= r.b && m.creditDebtId && (m.type === 'gasto' || m.type === 'transferencia'));
+      const other = D().movements.filter(m => m.date >= r.a && m.date <= r.b && m.inboxId && !m.creditDebtId && m.type === 'gasto' && m.account !== accId && Calc.isReal(m));
+      if (L.pending.length || card.length || other.length) {
+        const row = (m, why, act) => '<div class="list-item"><div class="li-main"><div class="li-title">' + esc(m.description || m.category) + ' · ' + money(m.amount) + '</div><div class="li-sub">' + fmtDateS(m.date) + ' · ' + why + '</div></div><div class="li-right">' + act + '</div></div>';
+        h += '<div class="card glass mt" id="reconCard"><div class="card-head"><h3>¿No cuadra el saldo?</h3><span class="sub">movimientos del periodo que no están descontando de ' + esc(info.name) + '</span></div>' +
+          L.pending.map(x => row(x.m, 'registrado sin confirmar: no cuenta hasta que lo confirmes', btn(x.v > 0 ? 'Marcar cobrado' : 'Marcar pagado', 'confirmMov', { id: x.m.id }, 'sm primary'))).join('') +
+          card.map(m => row(m, 'cargado a tarjeta de crédito (' + esc((Data.get('debts', m.creditDebtId) || {}).name || 'tarjeta') + '): sube la deuda, no descuenta de cuentas', btn('Salió de ' + esc(info.name), 'moveToAccount', { id: m.id, acc: accId }, 'sm'))).join('') +
+          other.map(m => row(m, 'registrado en ' + esc(accName(m.account)), btn('Salió de ' + esc(info.name), 'moveToAccount', { id: m.id, acc: accId }, 'sm'))).join('') + '</div>';
+      }
+    }
+    return h;
+  },
+  resCuentas(r) {
+    const refs = Calc.ledgerRefs(), rows = refs.map(x => Object.assign({ info: x }, Calc.ledger(x.ref, r.a, r.b)));
+    const acc = rows.filter(x => !x.isDebt), debt = rows.filter(x => x.isDebt), liq = acc.filter(x => x.info.liquid);
+    const tr = x => '<tr data-action="resAccount" data-ref="' + esc(x.ref) + '" class="ledger-row"><td><b>' + esc(x.info.name) + '</b><div class="tiny muted">' + esc(x.info.type) + ' · ' + x.rows.length + ' mov.</div></td><td class="amt">' + money(x.open) + '</td><td class="amt pos">' + (x.inc ? money(x.inc) : '—') + '</td><td class="amt">' + (x.exp ? money(x.exp) : '—') + '</td><td class="amt"><b>' + money(x.close) + '</b></td></tr>';
+    let h = '<div class="card glass"><div class="card-head"><h3>Cuentas</h3><span class="sub">toca una cuenta para ver su estado de cuenta</span></div><div class="table-wrap"><table id="accSummary"><thead><tr><th>Cuenta</th><th class="amt">Saldo inicial</th><th class="amt">Ingresos</th><th class="amt">Egresos</th><th class="amt">Saldo final</th></tr></thead><tbody>' + acc.map(tr).join('') + '</tbody>' +
+      '<tfoot><tr><td>Disponible (cuentas líquidas)</td><td class="amt">' + money(r2(sum(liq, x => x.open))) + '</td><td class="amt pos">' + money(r2(sum(liq, x => x.inc))) + '</td><td class="amt">' + money(r2(sum(liq, x => x.exp))) + '</td><td class="amt"><b>' + money(r2(sum(liq, x => x.close))) + '</b></td></tr></tfoot></table></div><p class="tiny muted">Los traspasos entre tus cuentas (retiros a Efectivo, ahorro) aparecen como egreso en una cuenta e ingreso en otra; en el total se compensan.</p></div>';
+    if (debt.length) h += '<div class="card glass mt"><div class="card-head"><h3>Deudas y tarjetas</h3></div><div class="table-wrap"><table><thead><tr><th>Deuda</th><th class="amt">Saldo inicial</th><th class="amt">Cargos</th><th class="amt">Pagos</th><th class="amt">Saldo final</th></tr></thead><tbody>' + debt.map(tr).join('') + '</tbody><tfoot><tr><td>Total deudas</td><td class="amt">' + money(r2(sum(debt, x => x.open))) + '</td><td class="amt">' + money(r2(sum(debt, x => x.inc))) + '</td><td class="amt">' + money(r2(sum(debt, x => x.exp))) + '</td><td class="amt"><b>' + money(r2(sum(debt, x => x.close))) + '</b></td></tr></tfoot></table></div></div>';
+    return h;
+  },
+  resCategorias(r) {
+    const c = Calc.byCategory(r.a, r.b), bud = Calc.budget(r.a, r.b), bmap = {}; bud.rows.forEach(x => { bmap[x.category] = x.budget; });
+    const tbl = (list, total, isExp) => '<div class="table-wrap"><table><thead><tr><th>Categoría</th><th class="amt">Mov.</th><th class="amt">Monto</th><th class="amt">%</th>' + (isExp ? '<th class="amt">Presupuesto</th>' : '') + '</tr></thead><tbody>' +
+      (list.length ? list.map(x => '<tr><td>' + esc(x.category) + (x.card ? '<div class="tiny muted">con tarjeta ' + money(x.card) + '</div>' : '') + '</td><td class="amt">' + x.count + '</td><td class="amt">' + money(x.amount) + '</td><td class="amt">' + pct(total ? x.amount / total : 0) + '</td>' + (isExp ? '<td class="amt">' + (bmap[x.category] ? money(bmap[x.category]) : '—') + '</td>' : '') + '</tr>').join('') : '<tr><td colspan="' + (isExp ? 5 : 4) + '" class="muted" style="text-align:center;padding:16px">Sin registros.</td></tr>') +
+      '</tbody><tfoot><tr><td>Total</td><td></td><td class="amt"><b>' + money(total) + '</b></td><td></td>' + (isExp ? '<td class="amt">' + money(bud.budget) + '</td>' : '') + '</tr></tfoot></table></div>';
+    let h = '<div class="grid g3">' + kpi('Ingresos', money(c.totalInc)) + kpi('Egresos', money(c.totalExp)) + kpi('Neto del periodo', money(c.net, true), '', c.net < 0 ? 'bad' : 'ok') + '</div>';
+    h += '<div class="grid g2 mt"><div class="card glass" id="catInc"><div class="card-head"><h3>Ingresos por categoría</h3></div>' + tbl(c.inc, c.totalInc, false) + '</div><div class="card glass" id="catExp"><div class="card-head"><h3>Egresos por categoría</h3></div>' + tbl(c.exp, c.totalExp, true) + '</div></div>';
     return h;
   },
   flowCards() {
@@ -2790,47 +2887,7 @@ const Views = {
       '</tbody></table></div></div>';
     return h;
   },
-  resSemanal() {
-    if (!ui.weekStart) ui.weekStart = Calc.weekStartOf(today());
-    const w = Calc.weekFood(ui.weekStart), isCur = ui.weekStart === Calc.weekStartOf(today());
-    const sm = Calc.periodSummary(w.start, w.end), bud = Calc.budget(w.start, w.end);
-    let h = '<div class="section-head"><div><h2>Semana ' + fmtDateS(w.start) + ' – ' + fmtDate(w.end) + (isCur ? ' ' + badge('Semana actual', 'b-teal') : '') + '</h2><p>Consumo de la semana contra su presupuesto, movimientos y saldos.</p></div><div class="actions">' +
-      btn(icon('left') + 'Anterior', 'weekNav', { dir: '-1' }, 'sm') + btn('Semana actual', 'weekNav', { dir: '0' }, 'sm') + btn('Siguiente' + icon('right'), 'weekNav', { dir: '1' }, 'sm') + btn('+ Gasto alimentación', 'newFood', { date: isCur ? today() : w.start }, 'primary') + '</div></div>';
-    h += '<div class="grid g4">' + kpi('Presupuesto alimentación', money(w.budget)) + kpi('Gastado', money(w.spent), w.items.length + ' movimientos') + kpi('Disponible', money(w.available), w.daysLeft > 0 && w.available > 0 ? '≈ ' + money(w.available / w.daysLeft) + ' por día' : '', w.available < 0 ? 'bad' : 'ok') + kpi('Días restantes', String(w.daysLeft), 'de 7') + '</div>';
-    h += '<div class="card glass mt"><div class="card-head"><h3>Consumido <span class="num" id="weekPct">' + pct(w.pct) + '</span></h3>' + badge(w.status.label, w.status.badge) + '</div>' + bar(w.pct, w.status.tone, true) +
-      '<div class="legend mt"><span>' + badge('Normal', 'b-ok') + ' 0–70%</span><span>' + badge('Atención', 'b-warn') + ' 70–90%</span><span>' + badge('Riesgo', 'b-risk') + ' &gt;90%</span><span>' + badge('Excedido', 'b-bad') + ' &gt;100%</span></div></div>';
-    h += '<div class="grid g2 mt"><div class="card glass"><div class="card-head"><h3>Movimientos y saldos de la semana</h3></div><div class="rows">' + summaryRows(sm) + '</div></div>';
-    h += '<div class="card glass"><div class="card-head"><h3>Presupuesto de la semana</h3>' + btn('Planear en Presupuesto', 'goBudget', { mode: 'semana', date: w.start }, 'sm ghost') + '</div>' + miniBudget(bud) + '</div></div>';
-    h += '<div class="card glass mt"><div class="card-head"><h3>Gastos de alimentación de la semana</h3><span class="sub">Otros gastos en la semana: ' + money(w.otherSpent) + '</span></div><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Descripción</th><th>Cuenta</th><th class="amt">Monto</th><th></th></tr></thead><tbody>' +
-      (w.items.length ? w.items.map(m => '<tr><td class="nowrap">' + fmtDateS(m.date) + '</td><td>' + esc(m.description) + (m.subcategory ? ' <span class="muted small">· ' + esc(m.subcategory) + '</span>' : '') + '</td><td>' + (m.creditDebtId ? 'Tarjeta' : esc(accName(m.account))) + '</td><td class="amt">' + money(m.amount) + '</td><td><div class="row-actions">' + btn('Editar', 'editMovement', { id: m.id }, 'sm') + btn('Eliminar', 'deleteMovement', { id: m.id }, 'sm danger') + '</div></td></tr>').join('') : emptyRow(5, 'Sin gastos de alimentación esta semana.')) +
-      '</tbody></table></div></div>';
-    return h;
-  },
-  resMensual() {
-    const t = today();
-    if (!/^\d{4}-\d{2}$/.test(ui.resMonth || '')) ui.resMonth = t.slice(0, 7);
-    const ms = ui.resMonth + '-01', me = monthEnd(ms), sm = Calc.periodSummary(ms, me);
-    let h = '<div class="section-head"><div><h2>Resumen mensual · ' + fmtMonth(ms) + '</h2><p>Movimientos y saldos del mes, desglosados por semana, por quincena y por cuenta.</p></div><div class="actions">' +
-      btn(icon('left'), 'resMonthNav', { dir: '-1' }, 'sm') + '<label class="field" style="min-width:170px"><input type="month" id="resMonth" value="' + esc(ui.resMonth) + '" aria-label="Mes"></label>' + btn(icon('right'), 'resMonthNav', { dir: '1' }, 'sm') + '</div></div>';
-    h += '<div class="grid g4">' + kpi('Saldo líquido inicial', money(sm.openLiquid), 'al ' + fmtDateS(addDays(ms, -1))) + kpi('Ingresos', money(sm.income), 'Ordinario ' + money(sm.ordinary) + (sm.extra ? ' · extra ' + money(sm.extra) : '')) +
-      kpi('Egresos', money(r2(sm.spent + sm.debtPaid)), 'Gastos ' + money(sm.spent) + (sm.debtPaid ? ' · deudas ' + money(sm.debtPaid) : '') + (sm.saved ? ' · ahorro ' + money(sm.saved) : '')) +
-      kpi('Saldo líquido final', money(sm.closeLiquid), (sm.closeLiquid - sm.openLiquid >= 0 ? '+' : '') + money(r2(sm.closeLiquid - sm.openLiquid)) + ' en el mes', sm.closeLiquid < sm.openLiquid ? 'warn' : 'ok') + '</div>';
-    // Por semana
-    const weeks = [];
-    for (let ws = Calc.weekStartOf(ms); ws <= me; ws = addDays(ws, 7)) { const lo = ws < ms ? ms : ws, we = addDays(ws, 6), hi = we > me ? me : we; weeks.push(Calc.periodSummary(lo, hi)); }
-    h += '<div class="card glass mt"><div class="card-head"><h3>Por semana</h3></div>' + periodTable(weeks, x => fmtDateS(x.start) + ' – ' + fmtDateS(x.end), 'mesSemanas') + '</div>';
-    // Por quincena (quincenas que inician en el mes)
-    const qs = Calc.paydaysBetween(ms, me).map(p => { const per = Calc.periodOf(p.date); return Object.assign(Calc.periodSummary(p.date, per.end), { expected: p.amount, q: p.q }); });
-    h += '<div class="card glass mt"><div class="card-head"><h3>Por quincena</h3><span class="sub">quincenas que inician en el mes</span></div><div class="table-wrap"><table><thead><tr><th>Quincena</th><th class="amt">Esperado</th><th class="amt">Recibido</th><th class="amt">Desviación</th><th class="amt">Gastos</th><th class="amt">Deudas</th><th class="amt">Ahorro</th><th class="amt">Neto</th></tr></thead><tbody>' +
-      (qs.length ? qs.map(x => { const dev = r2(x.income - x.expected); return '<tr><td class="nowrap">' + fmtDateS(x.start) + ' – ' + fmtDateS(x.end) + '</td><td class="amt">' + money(x.expected) + '</td><td class="amt">' + money(x.income) + '</td><td class="amt ' + (x.income ? (dev < 0 ? 'neg' : 'pos') : 'muted') + '">' + (x.income ? money(dev, true) : '—') + '</td><td class="amt">' + money(x.spent) + '</td><td class="amt">' + money(x.debtPaid) + '</td><td class="amt">' + money(x.saved) + '</td><td class="amt ' + (x.net < 0 ? 'neg' : 'pos') + '">' + money(x.net, true) + '</td></tr>'; }).join('') : emptyRow(8, 'Sin quincenas en el mes.')) + '</tbody></table></div></div>';
-    // Por cuenta
-    const fl = Calc.accountFlows(ms, me);
-    h += '<div class="grid g2 mt"><div class="card glass"><div class="card-head"><h3>Saldos por cuenta</h3></div><div class="table-wrap"><table><thead><tr><th>Cuenta</th><th class="amt">Inicial</th><th class="amt">Entradas</th><th class="amt">Salidas</th><th class="amt">Final</th></tr></thead><tbody>' +
-      fl.map(x => '<tr><td>' + esc(x.acc.name) + '<div class="tiny muted">' + ACC_TYPE_LABEL[x.acc.type] + '</div></td><td class="amt">' + money(x.open) + '</td><td class="amt pos">' + money(x.inflow) + '</td><td class="amt">' + money(x.outflow) + '</td><td class="amt"><b>' + money(x.close) + '</b></td></tr>').join('') + '</tbody></table></div>' +
-      (sm.cardSpent ? '<p class="small muted">Compras con tarjeta en el mes: ' + money(sm.cardSpent) + ' (aumentan la deuda, no salen de cuentas).</p>' : '') + '</div>';
-    h += '<div class="card glass"><div class="card-head"><h3>Presupuesto del mes</h3>' + btn('Ver en Presupuesto', 'goBudget', { mode: 'mes', date: ms }, 'sm ghost') + '</div>' + miniBudget(Calc.budget(ms, me)) + '</div></div>';
-    return h;
-  },
+
 
   /* ---------------- MOVIMIENTOS ---------------- */
   movimientos() {
@@ -3096,7 +3153,7 @@ const Views = {
       ['Hoy es día de cobro', 'Aparece una <b>alerta</b>. Toca <b>Registrar</b> y escribe lo que recibiste: la app separa ordinario, extraordinario y desviación.', 'Dashboard (alertas) o franja de la semana'],
       ['Hoy vence un pago (renta, luz, pago del viaje…)', 'En la alerta, <b>Registrar</b>: escribe lo que realmente pagaste. Verás la desviación contra lo programado.', 'Dashboard, Presupuesto o Calendario'],
       ['Recibí un bono, comisión o devolución', '<b>+ Registrar ingreso extraordinario</b>.', 'Movimientos'],
-      ['Gasté en comida', '<b>+ Gasto alimentación</b>.', 'Dashboard o Resumen → Semanal'],
+      ['Gasté en comida', '<b>+ Gasto alimentación</b>.', 'Inicio o Resumen → Por categoría (Semana)'],
       ['Gasté en otra categoría planeada', '<b>+ Gasto</b> en la fila de la categoría.', 'Presupuesto'],
       ['Compré con la tarjeta de crédito', 'Gasto con <b>método “Crédito”</b> y elige la tarjeta.', 'Movimientos'],
       ['Pagué la tarjeta u otra deuda', '<b>Registrar pago</b>.', 'Salidas → Deudas'],
@@ -3136,8 +3193,8 @@ const Views = {
     h += '<h3 style="margin-top:30px">Parte 6 · Rutina recomendada</h3><div class="card glass mt">' + tbl(['Cuándo', 'Qué hacer'], [
       ['Cada día (1 min)', 'Mira la franja de la semana y la campana. Registra gastos del día. Revisa el Disponible seguro antes de una compra no planeada.'],
       ['Días de cobro y pago', 'Atiende las alertas registrando los montos reales.'],
-      ['Cada semana', 'Resumen → Semanal. Si pasas de 70% antes de mitad de semana, ajusta. Planea la semana siguiente en Presupuesto.'],
-      ['Cada mes', 'Resumen → Mensual y Presupuesto mensual. Corre “Revisar duplicados”. <b>Exporta un respaldo JSON.</b>']
+      ['Cada semana', 'Resumen → Por categoría con periodo Semana. Si pasas de 70% antes de mitad de semana, ajusta. Planea la semana siguiente en Presupuesto.'],
+      ['Cada mes', 'Resumen → Por cuenta y Estado de cuenta (Mes), y Presupuesto mensual. Corre “Revisar duplicados”. <b>Exporta un respaldo JSON.</b>']
     ]) + '</div>';
     h += '<h3 style="margin-top:30px">Parte 7 · Respaldos y dispositivos</h3><div class="card glass mt"><div class="guide"><ul><li>Los datos se guardan solo en <b>este navegador de este dispositivo</b>.</li><li>Para pasar tus datos a otro dispositivo: <b>Exportar respaldo</b> aquí → <b>Importar respaldo</b> allá. Importar reemplaza todo. Los respaldos de versiones anteriores se convierten solos.</li><li>En iPhone, si abres el archivo desde Archivos, los datos podrían no conservarse entre aperturas: exporta respaldos con frecuencia.</li></ul></div></div>';
     return h;
@@ -3585,7 +3642,22 @@ const Actions = {
     App.render();
   },
   goBudget: ds => { ui.budMode = ds.mode === 'semana' ? 'semana' : 'mes'; if (ui.budMode === 'semana') ui.budWeek = ds.date; else ui.budMonth = ds.date.slice(0, 7); Nav.go('presupuesto'); },
-  goWeek: ds => { ui.weekStart = Calc.weekStartOf(ds.date); ui.tabs.resumen = 'semanal'; Nav.go('resumen'); },
+  goWeek: ds => { ui.res.per = 'semana'; ui.res.date = isDate(ds.date) ? ds.date : today(); ui.tabs.resumen = 'categorias'; Nav.go('resumen'); },
+  resPer: ds => { if (['semana', 'quincena', 'mes'].includes(ds.per)) ui.res.per = ds.per; App.render(); },
+  resNav: ds => {
+    const dir = Number(ds.dir), r = Calc.resRange(ui.res.per, ui.res.date || today());
+    if (dir === 0) ui.res.date = today();
+    else if (ui.res.per === 'semana') ui.res.date = addDays(r.a, 7 * dir);
+    else if (ui.res.per === 'quincena') ui.res.date = dir > 0 ? addDays(r.b, 1) : addDays(r.a, -1);
+    else ui.res.date = addMonthsStart(r.a, dir);
+    App.render();
+  },
+  // Conciliación: un cargo que se registró en la tarjeta de crédito pero salió de la cuenta bancaria
+  moveToAccount: ds => {
+    const m = Data.get('movements', ds.id), acc = Data.get('accounts', ds.acc); if (!m || !acc) return;
+    withUndo(() => { delete m.creditDebtId; m.account = acc.id; if (m.type === 'gasto') m.method = 'Débito'; if (m.cashKind === 'disposicion') m.cashKind = 'retiro'; m.status = 'realizado'; }, 'Movido a ' + acc.name + ': ya descuenta de su saldo');
+  },
+  resAccount: ds => { ui.res.acc = ds.ref; ui.tabs.resumen = 'estado'; App.render(); window.scrollTo(0, 0); },
   /* Cuentas y categorías */
   newAccount: () => Forms.account(null),
   editAccount: ds => { const a = Data.get('accounts', ds.id); if (a) Forms.account(a); },
@@ -3820,6 +3892,8 @@ const App = {
     if (id === 'budFrom' || id === 'budTo') { if (el.value) { ui[id] = el.value; $('budBody').innerHTML = Views.budBody(); } return; }
     if ((id === 'budMonth' || id === 'budWeek') && e.type === 'change' && el.value) { ui[id] = el.value; App.render(); return; }
     if (id === 'dashMonth' && e.type === 'change' && /^\d{4}-\d{2}$/.test(el.value)) { ui.dashMonth = el.value; ui.dashScope = 'mes'; const ms = el.value + '-01'; if (ui.dashWeek < Calc.weekStartOf(ms) || ui.dashWeek > monthEnd(ms)) ui.dashWeek = Calc.weekStartOf(ms <= today() && today() <= monthEnd(ms) ? today() : ms); App.render(); return; }
+    if (id === 'resAcc' && e.type === 'change') { ui.res.acc = el.value; App.render(); return; }
+    if (id === 'resDate' && e.type === 'change' && isDate(el.value)) { ui.res.date = el.value; App.render(); return; }
     if (id === 'resMonth' && e.type === 'change' && /^\d{4}-\d{2}$/.test(el.value)) { ui.resMonth = el.value; App.render(); return; }
     if ((id === 'cfg_q1Amount' || id === 'cfg_q2Amount') && $('cfg_expected')) { const a = num($('cfg_q1Amount').value), b = num($('cfg_q2Amount').value); $('cfg_expected').textContent = Number.isFinite(a) && Number.isFinite(b) ? money(a + b) : '—'; return; }
     if (id === 'repMonth' && e.type === 'change' && el.value) { ui.repMonth = el.value; App.render(); }
