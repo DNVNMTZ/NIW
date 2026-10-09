@@ -324,6 +324,7 @@ button.tile{cursor:pointer;font:inherit}
 .today-row .tr-main b{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .today-row .tr-main small{color:var(--muted);font-size:12px}
 .today-row .tr-amt{font-size:14px;white-space:nowrap}
+.kind-select{margin-top:6px;padding:6px 28px 6px 12px;border-radius:999px;font-size:12.5px;min-height:0;width:auto;max-width:100%}
 .done-movs{margin-top:8px;display:flex;flex-direction:column;gap:4px}
 .done-mov{display:flex;align-items:center;gap:10px;font-size:13px}.done-mov span{flex:1;color:var(--muted)}
 .sheet-violet{background:var(--violet);border-radius:var(--r-xl);padding:22px;color:#fff}
@@ -842,6 +843,7 @@ const Schema = {
     d.goals.forEach(g => { if (!GOAL_TYPE[g.kind]) g.kind = 'ahorro'; });
     d.goalPayments.forEach(p => { if (p.prepaid === undefined) p.prepaid = null; });
     d.budgets.forEach(b => { if (!b.overrides || typeof b.overrides !== 'object') b.overrides = {}; if (!b.period) b.period = 'mensual'; });
+    d.accounts.forEach(a => { if (a.id === 'acc_efectivo') a.type = 'liquida'; });
     d.movements.forEach(m => { if (m.status !== 'realizado' && m.status !== 'pendiente') m.status = m.date > today() ? 'pendiente' : 'realizado'; });
     d.recurringExpenses.forEach(r => { if (typeof r.active !== 'boolean') r.active = true; if (typeof r.reserve !== 'boolean') r.reserve = false; if (!Array.isArray(r.skips)) r.skips = []; });
     d.version = SCHEMA_VERSION;
@@ -1430,7 +1432,7 @@ const Calc = {
 /* =====================================================================
    BANK — notificaciones de cargos: lectura, bandeja, reglas y aprendizaje
    ===================================================================== */
-const STOP = new Set(['de', 'del', 'la', 'el', 'en', 'con', 'por', 'para', 'los', 'las', 'sa', 'cv', 'sapi', 'mex', 'mx', 'mexico', 'com', 'www', 'pos', 'compra', 'cargo', 'pago', 'tarjeta', 'credito', 'debito', 'mxn', 'usd', 'suc', 'sucursal', 'y', 'srl', 'rl', 'de', 'no']);
+const STOP = new Set(['aviso', 'notificacion', 'alerta', 'movimiento', 'operacion', 'transferencia', 'spei', 'retiro', 'deposito', 'abono', 'cuenta', 'banco', 'banregio', 'bbva', 'santander', 'banorte', 'hsbc', 'banamex', 'citibanamex', 'nu', 'realizado', 'realizada', 'aprobada', 'autorizada', 'consumo', 'tu', 'su', 'con', 'terminacion', 'importe', 'monto', 'cajero', 'efectivo', 'de', 'del', 'la', 'el', 'en', 'con', 'por', 'para', 'los', 'las', 'sa', 'cv', 'sapi', 'mex', 'mx', 'mexico', 'com', 'www', 'pos', 'compra', 'cargo', 'pago', 'tarjeta', 'credito', 'debito', 'mxn', 'usd', 'suc', 'sucursal', 'y', 'srl', 'rl', 'de', 'no']);
 function deaccent(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, ''); }
 const Bank = {
   /* ---- Lectura de una notificación ---- */
@@ -1474,10 +1476,21 @@ const Bank = {
     const txt = String((meta.subject || '') + '\n' + (text || '')).replace(/ /g, ' ');
     const a = this.parseAmount(txt);
     if (!a) return null;
-    const isCash = this.isCashText(txt);
-    const isCredit = !isCash && /(abono|dep[oó]sito|n[oó]mina|reembolso|devoluci[oó]n|recibiste|te transfirieron|transferencia recibida|spei recibido|ingreso a tu cuenta)/i.test(txt) && !/(compra|cargo|consumo|retiro|pagaste|enviaste)/i.test(txt);
+    const lead = this.leadKind(meta.subject, text);
+    const isCash = this.isCashText(txt) && lead !== 'abono';
+    const isCredit = lead ? lead === 'abono' : !isCash && /(abono|dep[oó]sito|n[oó]mina|reembolso|devoluci[oó]n|recibiste|te transfirieron|transferencia recibida|spei recibido|ingreso a tu cuenta)/i.test(txt) && !/(compra|cargo|consumo|retiro|pagaste|enviaste)/i.test(txt);
     const fb = meta.date ? String(meta.date).slice(0, 10) : today();
-    return { amount: a.amount, currency: a.currency, merchant: this.parseMerchant(txt) || (meta.subject || 'Cargo').slice(0, 40), last4: this.parseLast4(txt), date: this.parseDate(txt, fb), kind: isCash ? 'efectivo' : isCredit ? 'abono' : 'cargo', cashKind: isCash ? (/disposici[oó]n/i.test(txt) ? 'disposicion' : 'retiro') : '' };
+    const mer = this.parseMerchant(txt);
+    return { merchantFound: !!mer, amount: a.amount, currency: a.currency, merchant: mer || (meta.subject || 'Cargo').slice(0, 40), last4: this.parseLast4(txt), date: this.parseDate(txt, fb), kind: isCash ? 'efectivo' : isCredit ? 'abono' : 'cargo', cashKind: isCash ? (/disposici[oó]n/i.test(txt) ? 'disposicion' : 'retiro') : '' };
+  },
+  // La glosa del aviso manda: si empieza con "Retiro", "Cargo", "Compra"… es egreso; con "Depósito", "Abono"… es ingreso
+  leadKind(subject, body) {
+    const first = s => deaccent(String(s || '')).replace(/^[^A-Za-z]+/, '').toLowerCase();
+    for (const t of [first(subject), first(body)]) {
+      if (/^(retiro|cargo|compra|consumo|pago|transferencia enviada|envio|enviaste|domiciliacion|disposicion)\b/.test(t)) return 'cargo';
+      if (/^(deposito|abono|transferencia recibida|recibiste|ingreso|reembolso|devolucion|nomina)\b/.test(t)) return 'abono';
+    }
+    return '';
   },
   isCashText(txt) { return /(retiro (?:de |en )?efectivo|retiro en cajero|retiraste|disposici[oó]n (?:de |en )?efectivo|disposici[oó]n en cajero|cajero autom[aá]tico|\bATM\b)/i.test(txt); },
   // Cuenta "Efectivo": el dinero retirado se maneja como traspaso de saldo
@@ -1544,6 +1557,7 @@ const Bank = {
   suggest(item, model) {
     const r = this.rule(item.key);
     if (r) return { category: r.category, kind: r.kind, recurringId: r.recurringId, source: 'regla', rule: r };
+    if (item.noMerchant || item.kind === 'abono' || item.kind === 'efectivo') return null; // sin comercio identificado no se adivina
     const c = this.classify(item.merchant, model);
     return c ? { category: c.category, kind: 'esporadica', source: 'aprendido', confidence: c.confidence } : null;
   },
@@ -1586,7 +1600,7 @@ const Bank = {
       const dup = d.inbox.some(x => (raw.id && x.msgId === raw.id) || (x.date === p.date && Math.abs(x.amount - p.amount) < 0.005 && x.key === key));
       if (dup) { skipped++; return; }
       const snd = this.senderFor(raw.from);
-      const item = { id: uid('inb'), origAmount: p.amount, msgId: raw.id || '', source: source || 'manual', from: this.senderKey(raw.from), senderId: snd ? snd.id : '', bank: snd ? snd.bank : '', date: p.date, amount: p.amount, currency: p.currency, merchant: this.pretty(p.merchant), key, last4: p.last4, kind: p.kind, subject: raw.subject || '', raw: String(raw.body || raw.text || '').slice(0, 1200), status: 'pendiente', createdAt: new Date().toISOString() };
+      const item = { id: uid('inb'), noMerchant: !p.merchantFound, origAmount: p.amount, msgId: raw.id || '', source: source || 'manual', from: this.senderKey(raw.from), senderId: snd ? snd.id : '', bank: snd ? snd.bank : '', date: p.date, amount: p.amount, currency: p.currency, merchant: this.pretty(p.merchant), key, last4: p.last4, kind: p.kind, subject: raw.subject || '', raw: String(raw.body || raw.text || '').slice(0, 1200), status: 'pendiente', createdAt: new Date().toISOString() };
       d.inbox.push(item); added++;
       const mm = this.manualMatch(p);
       if (mm) { item.status = 'registrado'; item.movementId = mm.id; item.manual = true; item.postedAt = new Date().toISOString(); mm.inboxId = item.id; matched++; return; }
@@ -1633,7 +1647,7 @@ const Bank = {
     d.movements.push(m);
     pieces.forEach(x => d.movements.push(Object.assign({}, m, { id: uid('mov'), category: x.category, subcategory: '', amount: r2(x.amount), recurringId: undefined, occDate: undefined, description: name + ' · ' + x.category, notes: m.notes + ' · parte de un cargo dividido' })));
     item.status = 'registrado'; item.movementId = m.id; item.auto = !!o.byRule; item.postedAt = new Date().toISOString();
-    if (o.remember) {
+    if (o.remember && !item.noMerchant) {
       const ex = this.rule(item.key);
       const rule = Object.assign(ex || { id: uid('rule'), key: item.key, hits: 0 }, { merchant: name, category: o.category, subcategory: o.subcategory || '', kind: o.kind, recurringId: o.recurringId || '', auto: !!o.auto });
       rule.hits = (rule.hits || 0) + 1; rule.lastUsed = item.date;
@@ -2098,6 +2112,7 @@ const Forms = {
         if ((changed === 'date' || changed === 'incomeKind' || changed === 'type') && v.type === 'ingreso' && v.incomeKind === 'quincena' && isDate(v.date)) { const np = Calc.nearestPayday(v.date); set('forPayday', np.date); set('expected', np.amount); }
         if (changed === 'forPayday' && isDate(v.forPayday)) set('expected', payAmt(v.forPayday));
         if (changed === 'date' && isDate(v.date)) set('realized', v.date <= today());
+        if (changed === 'method' && v.method === 'Efectivo' && v.type === 'gasto') set('account', Bank.cashAccount().id);
         if (changed === 'link' && v.link) { const c = cands.find(x => x.key === v.link); if (c) { set('category', c.category); set('description', c.desc); set('amount', c.amount); if (c.account) set('account', c.account); } }
       },
       preview(v) {
@@ -2107,6 +2122,7 @@ const Forms = {
           return (sh ? '<div class="small" style="margin-bottom:6px">' + badge(sh, 'b-violet') + '</div>' : '') + '<div class="rows small"><div class="row"><span class="lbl">Esperado</span><b class="num">' + money(v.expected) + '</b></div><div class="row"><span class="lbl">Recibido</span><b class="num">' + money(v.amount) + '</b></div><div class="row"><span class="lbl">Ingreso ordinario</span><b class="num">' + money(ord) + '</b></div><div class="row"><span class="lbl">Ingreso extraordinario</span><b class="num pos">' + money(ex) + '</b></div><div class="row"><span class="lbl">Desviación</span><b class="num ' + (dev < 0 ? 'neg' : dev > 0 ? 'pos' : '') + '">' + money(dev, true) + '</b></div></div>';
         }
         if (!isEdit && v.type === 'gasto' && !v.link && v.split) return splitPreview(v, v.amount, v.category);
+        if (v.type === 'gasto' && v.account === Bank.cashAccount().id && !isCredit(v)) { const have = Calc.balances()[v.account] || 0, after = r2(have - (Number(v.amount) || 0) + (isEdit && existing.account === v.account ? existing.amount : 0)); return '<span class="small">Efectivo disponible: <b>' + money(have) + '</b>' + (Number.isFinite(v.amount) ? ' → quedará <b class="' + (after < 0 ? 'neg' : '') + '">' + money(after) + '</b>' + (after < 0 ? ' (registra antes el retiro de efectivo)' : '') : '') + '</span>'; }
         if (v.type === 'gasto' && v.link) {
           const c = cands.find(x => x.key === v.link);
           if (c) { const dev = Number.isFinite(v.amount) ? r2(c.amount - v.amount) : null; return '<div class="rows small"><div class="row"><span class="lbl">Programado · ' + esc(c.name) + ' (' + fmtDateS(c.date) + ')</span><b class="num">' + money(c.amount) + '</b></div><div class="row"><span class="lbl">Real</span><b class="num">' + (Number.isFinite(v.amount) ? money(v.amount) : '—') + '</b></div>' + (dev != null ? '<div class="row"><span class="lbl">Desviación vs programado</span><b class="num ' + (dev < 0 ? 'neg' : dev > 0 ? 'pos' : '') + '">' + money(dev, true) + '</b></div>' : '') + '</div>'; }
@@ -2412,13 +2428,26 @@ const Forms = {
         { name: 'amount', label: 'Monto', type: 'number', required: true, min: 0.01, minMsg: 'El monto debe ser mayor a cero' },
         { name: 'description', label: 'Descripción', type: 'text', full: true, placeholder: 'Opcional · ej. Cajero Banregio' },
         { name: 'realized', label: 'Ya se retiró (es dinero real)', type: 'checkbox' },
+        { name: 'spent', label: 'Gasté parte de este efectivo de inmediato', type: 'checkbox', show: () => !isEdit, hint: 'Registra el gasto aquí mismo: el retiro completo pasa a Efectivo y el gasto sale de Efectivo; el resto queda disponible en efectivo.' },
+        { name: 'spentAmt', label: 'Monto gastado', type: 'number', show: v => !isEdit && v.spent },
+        { name: 'spentCat', label: 'Categoría del gasto', type: 'select', options: () => catOptions(false, 'gasto'), show: v => !isEdit && v.spent },
+        { name: 'spentDesc', label: 'Descripción del gasto', type: 'text', full: true, placeholder: 'Ej. Mercado, taxi, propina…', show: v => !isEdit && v.spent },
         { name: 'notes', label: 'Notas', type: 'textarea', full: true }
       ],
-      preview(v) { const cr = String(v.payWith).startsWith('debt|'); return '<span class="small">' + (cr ? 'Disposición: la deuda de la tarjeta sube ' : 'Traspaso: sale de tu cuenta y entra ') + (Number.isFinite(v.amount) ? money(v.amount) : '') + (cr ? ' y ese efectivo entra' : '') + ' a <b>' + esc(cash.name) + '</b>. Después registra tus gastos en efectivo eligiendo la cuenta ' + esc(cash.name) + '.</span>'; },
+      validate(v) {
+        if (!isEdit && v.spent) {
+          if (!(Number(v.spentAmt) > 0)) return { spentAmt: 'Escribe cuánto gastaste' };
+          if (Number(v.spentAmt) > Number(v.amount) + 0.004) return { spentAmt: 'No puede ser mayor que el retiro (' + money(v.amount) + ')' };
+        }
+        return null;
+      },
+      preview(v) { if (!isEdit && v.spent && Number.isFinite(v.amount) && Number(v.spentAmt) > 0) { const rest = r2(v.amount - v.spentAmt); return '<div class="rows small"><div class="row"><span class="lbl">Traspaso a ' + esc(cash.name) + '</span><b class="num">' + money(v.amount) + '</b></div><div class="row"><span class="lbl">Gasto en efectivo · ' + esc(v.spentCat || '') + '</span><b class="num">−' + money(v.spentAmt) + '</b></div><div class="row total"><span class="lbl">Queda en efectivo</span><b class="num ' + (rest < 0 ? 'neg' : '') + '">' + money(rest) + '</b></div></div>'; } const cr = String(v.payWith).startsWith('debt|'); return '<span class="small">' + (cr ? 'Disposición: la deuda de la tarjeta sube ' : 'Traspaso: sale de tu cuenta y entra ') + (Number.isFinite(v.amount) ? money(v.amount) : '') + (cr ? ' y ese efectivo entra' : '') + ' a <b>' + esc(cash.name) + '</b>. Después registra tus gastos en efectivo eligiendo la cuenta ' + esc(cash.name) + '.</span>'; },
       onSubmit(v) {
         const m = Bank.cashMovement({ payWith: v.payWith, date: v.date, amount: v.amount, description: v.description, notes: v.notes, status: v.realized ? 'realizado' : 'pendiente', inboxId: item ? item.id : (existing && existing.inboxId) });
         withUndo(() => {
           if (isEdit) { m.id = existing.id; m.createdAt = existing.createdAt; Data.upsert('movements', m); }
+          if (!isEdit && v.spent && Number(v.spentAmt) > 0) D().movements.push({ id: uid('mov'), type: 'gasto', date: v.date, amount: r2(v.spentAmt), category: v.spentCat, subcategory: '', description: v.spentDesc || ('Gasto en efectivo · ' + v.spentCat), account: cash.id, method: 'Efectivo', notes: 'Pagado con el efectivo del retiro', status: m.status, inboxId: item ? item.id : undefined, cashFrom: m.id, createdAt: new Date().toISOString() });
+          if (isEdit) { /* ya actualizado */ }
           else if (item) { D().movements.push(m); Bank.afterPost(item, m.amount); item.status = 'registrado'; item.movementId = m.id; item.postedAt = new Date().toISOString(); }
           else D().movements.push(m);
         }, (m.cashKind === 'disposicion' ? 'Disposición' : 'Retiro') + ' registrado · ' + money(m.amount) + ' a ' + cash.name);
@@ -2473,7 +2502,7 @@ const Forms = {
         { name: 'frequency', label: 'Periodicidad', type: 'select', options: FREQS.filter(f => f.value !== 'personalizada'), show: v => v.kind === 'recurrente' && !v.recurringId },
         { name: 'payWith', label: 'Se pagó con', type: 'select', full: true, options: payOpts, hint: 'Crédito: aumenta la deuda de la tarjeta. Débito: sale de la cuenta.' },
       ].concat(splitFields(v => v.kind !== 'recurrente')).concat([
-        { name: 'remember', label: 'Recordar esta categoría para ' + item.merchant, type: 'checkbox' },
+        { name: 'remember', label: 'Recordar esta categoría para ' + item.merchant, type: 'checkbox', show: () => !item.noMerchant },
         { name: 'auto', label: 'Registrar automáticamente los próximos cargos de este comercio', type: 'checkbox', show: v => v.remember && !v.split, hint: 'Los verás en la pestaña “Categorizados” con opción de regresarlos.' }
       ]),
       validate(v) { if (Number(v.amount) > item.amount + 0.004) return { amount: 'El aviso es por ' + money(item.amount) + '; no puedes registrar más' }; return splitCheck(v, Number(v.amount)); },
@@ -2719,8 +2748,8 @@ const Views = {
     h += '<div class="card glass"><div class="card-head"><h3>Por categorizar · ' + pend.length + '</h3>' + (Bank.configured() ? '<span class="sub">correo conectado' + (mail.lastSyncAt ? ' · revisado ' + fmtDate(mail.lastSyncAt.slice(0, 10)) : '') + ' · ' + '<button type="button" class="link-btn" data-action="mailSetup">ajustes</button></span>' : '') + '</div>' +
       (pend.length ? pend.map(x => { const sg = Bank.suggest(x, model), card = Bank.cardFor(x.last4);
         return '<div class="inbox-item" data-inbox="' + esc(x.id) + '"><span class="m-ic">' + esc((x.merchant || '?').slice(0, 1)) + '</span><div><div class="m-name">' + esc(x.merchant) + (x.kind === 'abono' ? ' ' + badge('Ingreso', 'b-ok') : '') + (x.kind === 'efectivo' ? ' ' + badge(x.cashKind === 'disposicion' ? 'Disposición de efectivo' : 'Retiro de efectivo', 'b-warn') : '') + '</div><div class="m-sub">' + fmtDateL(x.date) + (x.last4 ? ' · tarjeta ····' + esc(x.last4) + (card ? '' : ' (nueva)') : '') + '</div>' +
-          (x.kind === 'abono' ? '<div class="suggest muted">Ingreso: asócialo a tu quincena o regístralo como extraordinario</div>' : x.kind === 'efectivo' ? '<div class="suggest muted">Se registra como traspaso a tu cuenta Efectivo; no necesita categoría</div>' : sg ? '<div class="suggest">' + badge(sg.source === 'regla' ? 'Regla' : 'Sugerido ' + Math.round(sg.confidence * 100) + '%', sg.source === 'regla' ? 'b-lime' : 'b-violet') + ' ' + esc(sg.category) + (sg.kind === 'recurrente' ? ' · cargo recurrente' : '') + '</div>' : '<div class="suggest muted">Comercio nuevo: categorízalo una vez</div>') + '</div>' +
-          '<div class="m-actions" style="text-align:right"><div class="m-amt num">' + money(x.amount) + '</div><div class="actions" style="justify-content:flex-end;margin-top:6px">' + (x.kind === 'abono' ? btn('Registrar ingreso', 'inboxIncome', { id: x.id }, 'sm primary') + btn('Es un cargo', 'inboxFlip', { id: x.id }, 'sm ghost') : x.kind === 'efectivo' ? btn('Pasar a Efectivo', 'inboxCash', { id: x.id }, 'sm primary') : (sg ? btn('Aceptar', 'inboxAccept', { id: x.id }, 'sm primary') : '') + btn(sg ? 'Cambiar' : 'Categorizar', 'inboxCategorize', { id: x.id }, 'sm' + (sg ? '' : ' primary')) + btn('Es ingreso', 'inboxFlip', { id: x.id }, 'sm ghost') + btn('Es ingreso', 'inboxFlip', { id: x.id }, 'sm ghost')) + btn('Descartar', 'inboxDiscard', { id: x.id }, 'sm ghost') + '</div></div></div>'; }).join('')
+          (x.kind === 'abono' ? '<div class="suggest muted">Ingreso: asócialo a tu quincena o regístralo como extraordinario</div>' : x.kind === 'efectivo' ? '<div class="suggest muted">Se registra como traspaso a tu cuenta Efectivo; no necesita categoría</div>' : sg ? '<div class="suggest">' + badge(sg.source === 'regla' ? 'Regla' : 'Sugerido ' + Math.round(sg.confidence * 100) + '%', sg.source === 'regla' ? 'b-lime' : 'b-violet') + ' ' + esc(sg.category) + (sg.kind === 'recurrente' ? ' · cargo recurrente' : '') + '</div>' : '<div class="suggest muted">' + (x.noMerchant ? 'El aviso no trae el nombre del comercio: categorízalo a mano (no se aprende)' : 'Comercio nuevo: categorízalo una vez') + '</div>') + '</div>' +
+          '<div class="m-actions" style="text-align:right"><div class="m-amt num ' + (x.kind === 'abono' ? 'pos' : '') + '">' + (x.kind === 'abono' ? '+' : '−') + money(x.amount) + '</div><select class="kind-select" data-inbox-kind="' + esc(x.id) + '" aria-label="Tipo de movimiento">' + [['cargo', 'Egreso'], ['abono', 'Ingreso'], ['efectivo', 'Retiro de efectivo']].map(o => '<option value="' + o[0] + '"' + (x.kind === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select><div class="actions" style="justify-content:flex-end;margin-top:6px">' + (x.kind === 'abono' ? btn('Registrar ingreso', 'inboxIncome', { id: x.id }, 'sm primary') : x.kind === 'efectivo' ? btn('Pasar a Efectivo', 'inboxCash', { id: x.id }, 'sm primary') : (sg ? btn('Aceptar', 'inboxAccept', { id: x.id }, 'sm primary') : '') + btn(sg ? 'Cambiar' : 'Categorizar', 'inboxCategorize', { id: x.id }, 'sm' + (sg ? '' : ' primary'))) + btn('Descartar', 'inboxDiscard', { id: x.id }, 'sm ghost') + '</div></div></div>'; }).join('')
         : '<div class="empty">' + (Bank.configured() ? 'No hay cargos nuevos. Toca “Revisar correo” para buscar avisos recientes.' : 'Conecta tu correo o pega el texto de una notificación de tu banco para empezar.') + '</div>') + '</div>';
     const sends = d.senders || [], unknown = Array.from(new Set(pend.filter(x => x.from && !x.senderId && !Bank.senderFor(x.from)).map(x => x.from))).slice(0, 3);
     h += '<div class="card glass mt" id="sendersCard"><div class="card-head"><h3>Remitentes de tus bancos · ' + sends.length + '</h3>' + btn(icon('plus') + 'Agregar remitente', 'newSender', {}, 'sm primary') + '</div><p class="small muted" style="margin-top:0">Cada correo de aviso se asocia a su banco y a la cuenta o tarjeta donde se registra el cargo. La app solo busca avisos de estos remitentes.</p>' +
@@ -3078,7 +3107,7 @@ const Views = {
       '<li><b>Conecta tu correo una vez</b> (Bandeja → Conectar correo). Un script pequeño en tu cuenta de Gmail lee solo los avisos de tu banco; la app los trae al abrirla o al tocar “Revisar correo”.</li>' +
       '<li><b>Registra los remitentes</b> (Bandeja → Agregar remitente): el correo con el que te avisa cada banco, el nombre del banco y la cuenta o tarjeta donde se registran sus cargos. La app solo busca avisos de esos remitentes y usa esa cuenta por defecto; si el aviso trae la terminación de una tarjeta ya conocida, manda la tarjeta.</li>' +
       '<li><b>¿Desde cuándo lee?</b> En Conectar correo eliges “Leer avisos desde” (vacío = últimos 45 días); después solo trae lo nuevo. Si ya registraste cargos a mano, no se duplican: un aviso con el mismo monto y fecha (±2 días) se vincula a tu movimiento y aparece en Procesados como “Ya lo tenías registrado”.</li>' +
-      '<li><b>Retiros y disposiciones en efectivo</b> no son gastos: pasan como traspaso a tu cuenta <b>Efectivo</b> (un retiro sale de tu cuenta; una disposición sube la deuda de la tarjeta). Luego registras tus gastos en efectivo eligiendo esa cuenta. También desde “+” → Retiro de efectivo.</li>' +
+      '<li><b>Retiros y disposiciones en efectivo</b> no son gastos: pasan como traspaso a tu cuenta <b>Efectivo</b> (un retiro sale de tu cuenta; una disposición sube la deuda de la tarjeta). Si gastaste parte al momento, marca “Gasté parte de este efectivo” y registra ese gasto en el mismo paso; el resto queda en Efectivo. Después, cada compra en efectivo se registra con “+” → Gasto en efectivo (sale de la cuenta Efectivo y se categoriza normal). El efectivo forma parte de tu Disponible real: Inicio muestra “En bancos” y “Efectivo” por separado.</li>' +
       '<li><b>Ingresos y gastos</b> se registran distinto: un ingreso (depósito, nómina) se asocia a su quincena aunque llegue antes o después, y el calendario lo muestra el día real; un gasto se categoriza y, si hace falta, se <b>divide</b> entre varias categorías (ej. 1,000 comida y 1,000 deudas). Cada formulario muestra solo las categorías de su tipo.</li>' +
       '<li>En la pestaña <b>Categorizados</b> revisas todo lo registrado desde avisos: edítalo, elimínalo o regrésalo a Por categorizar. Eliminar un movimiento que vino de un aviso lo regresa a Por categorizar.</li>' +
       '<li>Sin conexión también funciona: toca <b>Pegar notificación</b> y pega el texto del correo o SMS (puedes pegar varios).</li>' +
@@ -3240,9 +3269,10 @@ function dayDetailHtml(ds) {
 function availableTile(sf, ws, we, ms, me) {
   const scope = ui.dashScope || 'total';
   if (scope === 'total') {
-    const total = Calc.liquid(), pf = Calc.pendingFlows();
+    const total = Calc.liquid(), pf = Calc.pendingFlows(), bal = Calc.balances(), cashIds = D().accounts.filter(a => a.type === 'liquida' && (a.id === 'acc_efectivo' || /efectivo/i.test(a.name))).map(a => a.id), cashAmt = r2(sum(cashIds, id => bal[id] || 0));
+    const split = '<span class="t-sub" id="dashCash">En bancos <b class="num">' + money(r2(total - cashAmt)) + '</b> · Efectivo <b class="num">' + money(cashAmt) + '</b></span>';
     const pendLine = (pf.inflow || pf.outflow) ? '<span class="t-sub" id="dashPending">Registrado sin confirmar: por cobrar <b class="num">+' + money(pf.inflow) + '</b> · por pagar <b class="num">−' + money(pf.outflow) + '</b> → proyectado <b class="num">' + money(r2(total + pf.net)) + '</b></span>' : '';
-    return '<button type="button" class="tile lime' + (total < 0 ? ' bad' : '') + '" id="dashSafe" data-action="safeDetail"><span class="t-ic">' + icon('shield') + '</span><span class="t-sub">Disponible real · lo ya cobrado menos lo ya pagado</span><span class="t-big num" id="dashSafeValue">' + money(total) + '</span>' + pendLine + '<span class="t-sub">Seguro para gastar hasta tu próximo cobro (' + fmtDateS(sf.nextPayday) + '): <b class="num">' + money(sf.safe) + '</b> · ver cálculo</span></button>';
+    return '<button type="button" class="tile lime' + (total < 0 ? ' bad' : '') + '" id="dashSafe" data-action="safeDetail"><span class="t-ic">' + icon('shield') + '</span><span class="t-sub">Disponible real · lo ya cobrado menos lo ya pagado</span><span class="t-big num" id="dashSafeValue">' + money(total) + '</span>' + split + pendLine + '<span class="t-sub">Seguro para gastar hasta tu próximo cobro (' + fmtDateS(sf.nextPayday) + '): <b class="num">' + money(sf.safe) + '</b> · ver cálculo</span></button>';
   }
   const a = scope === 'semana' ? ws : ms, b = scope === 'semana' ? we : me;
   const sm = Calc.periodSummary(a, b), bud = Calc.budget(a, b);
@@ -3456,8 +3486,9 @@ const Actions = {
   newExpenseCat: ds => Forms.movement(null, { _title: 'Gasto · ' + ds.cat, type: 'gasto', category: ds.cat, description: ds.cat, date: isDate(ds.date) ? ds.date : today() }),
   editMovement: ds => { const m = Data.get('movements', ds.id); if (m) (m.cashKind ? Forms.cash(m) : Forms.movement(m)); },
   newCash: () => Forms.cash(),
+  newCashExpense: () => { const c = Bank.cashAccount(); Forms.movement(null, { _title: 'Gasto en efectivo', type: 'gasto', account: c.id, method: 'Efectivo', category: 'Alimentación', description: '' }); },
   inboxIncome: ds => { const it = (D().inbox || []).find(x => x.id === ds.id); if (it) Forms.movement(null, Bank.incomePreset(it)); },
-  inboxFlip: ds => { const it = (D().inbox || []).find(x => x.id === ds.id); if (!it) return; it.kind = it.kind === 'abono' ? 'cargo' : 'abono'; App.refresh(); Toast.show(it.kind === 'abono' ? 'Marcado como ingreso' : 'Marcado como cargo', 'ok'); },
+  inboxSetKind: ds => { const it = (D().inbox || []).find(x => x.id === ds.id); if (!it || !['cargo', 'abono', 'efectivo'].includes(ds.kind)) return; it.kind = ds.kind; it.kindManual = true; if (ds.kind === 'efectivo' && !it.cashKind) it.cashKind = 'retiro'; App.refresh(); Toast.show(ds.kind === 'abono' ? 'Marcado como ingreso' : ds.kind === 'efectivo' ? 'Marcado como retiro de efectivo' : 'Marcado como egreso', 'ok'); },
   inboxCash: ds => { const it = (D().inbox || []).find(x => x.id === ds.id); if (it) Forms.cash(null, { _item: it }); },
   dupMovement: ds => { const m = Data.get('movements', ds.id); if (!m) return; const c = Object.assign({}, m); delete c.id; delete c.recurringId; delete c.occDate; delete c.goalPaymentId; delete c.link; c._dup = true; c._title = 'Duplicar movimiento'; Forms.movement(null, c); },
   deleteMovement: async ds => {
@@ -3618,7 +3649,7 @@ const Actions = {
       opt('food', 'Comida', 'Gasto del día a día', 'newFood') + opt('card', 'Otro gasto', 'Con categoría y cuenta', 'newMovement') +
       opt('inbox', 'Cargo del banco', 'Pega el aviso de tu tarjeta', 'pasteCharge') + opt('cal', 'Pago programado', 'Renta, servicios, viaje…', 'goto', { target: 'presupuesto' }) +
       opt('down', 'Cobro de nómina', 'Ingreso de la quincena', 'newIncomeQ') + opt('spark', 'Ingreso extra', 'Bono, comisión, devolución', 'newIncomeExtra') +
-      opt('flag', 'Aportar a una meta', 'Ahorro para viaje u otra', 'goto', { target: 'metas' }) + opt('repeat', 'Transferencia', 'Entre tus cuentas', 'newTransfer') + opt('cash', 'Retiro de efectivo', 'Cajero o disposición con tarjeta', 'newCash') + '</div>', true);
+      opt('flag', 'Aportar a una meta', 'Ahorro para viaje u otra', 'goto', { target: 'metas' }) + opt('repeat', 'Transferencia', 'Entre tus cuentas', 'newTransfer') + opt('cash', 'Retiro de efectivo', 'Cajero o disposición con tarjeta', 'newCash') + opt('bag', 'Gasto en efectivo', 'Paga con tu efectivo', 'newCashExpense') + '</div>', true);
   },
   newTransfer: () => Forms.movement(null, { _title: 'Transferencia entre cuentas', type: 'transferencia', description: 'Transferencia', method: 'Transferencia' }),
   /* Bandeja de cargos */
@@ -3755,6 +3786,8 @@ const App = {
   },
   onInput(e) {
     const el = e.target, id = el.id;
+    // Tipo de un aviso de la bandeja (egreso / ingreso / efectivo)
+    if (el.dataset.inboxKind) { if (e.type === 'change') Actions.inboxSetKind({ id: el.dataset.inboxKind, kind: el.value }); return; }
     // Ajustes rápidos del flujo: recalcular al instante
     if (el.dataset.quick) {
       const v = num(el.value), errEl = el.parentElement.querySelector('.err');
