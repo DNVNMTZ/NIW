@@ -324,6 +324,8 @@ button.tile{cursor:pointer;font:inherit}
 .today-row .tr-main b{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .today-row .tr-main small{color:var(--muted);font-size:12px}
 .today-row .tr-amt{font-size:14px;white-space:nowrap}
+.done-movs{margin-top:8px;display:flex;flex-direction:column;gap:4px}
+.done-mov{display:flex;align-items:center;gap:10px;font-size:13px}.done-mov span{flex:1;color:var(--muted)}
 .sheet-violet{background:var(--violet);border-radius:var(--r-xl);padding:22px;color:#fff}
 .sheet-violet .card-head h3{font-family:var(--display);font-weight:400;font-size:22px}
 .sheet-violet .card-head .sub,.sheet-violet .muted{color:rgba(255,255,255,.72)}
@@ -1473,7 +1475,7 @@ const Bank = {
     const a = this.parseAmount(txt);
     if (!a) return null;
     const isCash = this.isCashText(txt);
-    const isCredit = !isCash && /(abono|dep[oó]sito recibido|reembolso|devoluci[oó]n|recibiste|te transfirieron)/i.test(txt) && !/(compra|cargo|consumo)/i.test(txt);
+    const isCredit = !isCash && /(abono|dep[oó]sito|n[oó]mina|reembolso|devoluci[oó]n|recibiste|te transfirieron|transferencia recibida|spei recibido|ingreso a tu cuenta)/i.test(txt) && !/(compra|cargo|consumo|retiro|pagaste|enviaste)/i.test(txt);
     const fb = meta.date ? String(meta.date).slice(0, 10) : today();
     return { amount: a.amount, currency: a.currency, merchant: this.parseMerchant(txt) || (meta.subject || 'Cargo').slice(0, 40), last4: this.parseLast4(txt), date: this.parseDate(txt, fb), kind: isCash ? 'efectivo' : isCredit ? 'abono' : 'cargo', cashKind: isCash ? (/disposici[oó]n/i.test(txt) ? 'disposicion' : 'retiro') : '' };
   },
@@ -1584,7 +1586,7 @@ const Bank = {
       const dup = d.inbox.some(x => (raw.id && x.msgId === raw.id) || (x.date === p.date && Math.abs(x.amount - p.amount) < 0.005 && x.key === key));
       if (dup) { skipped++; return; }
       const snd = this.senderFor(raw.from);
-      const item = { id: uid('inb'), msgId: raw.id || '', source: source || 'manual', from: this.senderKey(raw.from), senderId: snd ? snd.id : '', bank: snd ? snd.bank : '', date: p.date, amount: p.amount, currency: p.currency, merchant: this.pretty(p.merchant), key, last4: p.last4, kind: p.kind, subject: raw.subject || '', raw: String(raw.body || raw.text || '').slice(0, 1200), status: 'pendiente', createdAt: new Date().toISOString() };
+      const item = { id: uid('inb'), origAmount: p.amount, msgId: raw.id || '', source: source || 'manual', from: this.senderKey(raw.from), senderId: snd ? snd.id : '', bank: snd ? snd.bank : '', date: p.date, amount: p.amount, currency: p.currency, merchant: this.pretty(p.merchant), key, last4: p.last4, kind: p.kind, subject: raw.subject || '', raw: String(raw.body || raw.text || '').slice(0, 1200), status: 'pendiente', createdAt: new Date().toISOString() };
       d.inbox.push(item); added++;
       const mm = this.manualMatch(p);
       if (mm) { item.status = 'registrado'; item.movementId = mm.id; item.manual = true; item.postedAt = new Date().toISOString(); mm.inboxId = item.id; matched++; return; }
@@ -1609,11 +1611,12 @@ const Bank = {
     const d = D();
     const [ptype, pid] = String(o.payWith || this.payWithDefault(item)).split('|');
     const name = o.name || item.merchant;
+    const total = r2(Number(o.amount) > 0 ? Number(o.amount) : item.amount);
     let link = '';
     if (o.kind === 'recurrente') {
       let r = o.recurringId && d.recurringExpenses.find(x => x.id === o.recurringId);
       if (!r) {
-        r = { id: uid('rec'), name, category: o.category, amount: item.amount, frequency: o.frequency || 'mensual', payDay: parts(item.date).d, payDayTo: null, customDays: null, startDate: item.date, endDate: '', account: ptype === 'acc' ? pid : (d.accounts[0] ? d.accounts[0].id : ''), reserve: false, active: true, skips: [], notes: 'Creado desde un cargo del banco' + (ptype === 'debt' ? ' · se paga con tarjeta' : '') };
+        r = { id: uid('rec'), name, category: o.category, amount: total, frequency: o.frequency || 'mensual', payDay: parts(item.date).d, payDayTo: null, customDays: null, startDate: item.date, endDate: '', account: ptype === 'acc' ? pid : (d.accounts[0] ? d.accounts[0].id : ''), reserve: false, active: true, skips: [], notes: 'Creado desde un cargo del banco' + (ptype === 'debt' ? ' · se paga con tarjeta' : '') };
         d.recurringExpenses.push(r);
       }
       o.recurringId = r.id;
@@ -1621,11 +1624,14 @@ const Bank = {
       const occ = Calc.occurrences(r, addDays(item.date, -20), addDays(item.date, 20)).filter(x => !Calc.isOccPaid(r, x)).sort((a, b) => Math.abs(diffDays(a, item.date)) - Math.abs(diffDays(b, item.date)))[0];
       link = 'rec|' + r.id + '|' + (occ || item.date);
     }
-    const m = { id: uid('mov'), type: 'gasto', date: item.date, amount: item.amount, category: o.category, subcategory: o.subcategory || '', description: name, merchant: item.merchant, account: ptype === 'acc' ? pid : (d.accounts[0] ? d.accounts[0].id : ''), method: ptype === 'debt' ? 'Crédito' : 'Débito', notes: 'Cargo del banco' + (item.bank ? ' ' + item.bank : '') + (item.last4 ? ' · tarjeta ' + item.last4 : '') + (o.byRule ? ' · categorizado automáticamente' : ''), inboxId: item.id, createdAt: new Date().toISOString() };
+    const m = { id: uid('mov'), type: 'gasto', date: o.date || item.date, amount: total, category: o.category, subcategory: o.subcategory || '', description: name, merchant: item.merchant, account: ptype === 'acc' ? pid : (d.accounts[0] ? d.accounts[0].id : ''), method: ptype === 'debt' ? 'Crédito' : 'Débito', notes: 'Cargo del banco' + (item.bank ? ' ' + item.bank : '') + (item.last4 ? ' · tarjeta ' + item.last4 : '') + (o.byRule ? ' · categorizado automáticamente' : ''), inboxId: item.id, createdAt: new Date().toISOString() };
     if (ptype === 'debt') m.creditDebtId = pid;
     if (link) { const k = link.split('|'); m.recurringId = k[1]; m.occDate = k[2]; }
     m.status = 'realizado';
+    const pieces = (o.splits || []).filter(x => x && x.category && Number(x.amount) > 0);
+    if (pieces.length) { m.splitId = uid('split'); m.amount = r2(total - sum(pieces, x => Number(x.amount))); }
     d.movements.push(m);
+    pieces.forEach(x => d.movements.push(Object.assign({}, m, { id: uid('mov'), category: x.category, subcategory: '', amount: r2(x.amount), recurringId: undefined, occDate: undefined, description: name + ' · ' + x.category, notes: m.notes + ' · parte de un cargo dividido' })));
     item.status = 'registrado'; item.movementId = m.id; item.auto = !!o.byRule; item.postedAt = new Date().toISOString();
     if (o.remember) {
       const ex = this.rule(item.key);
@@ -1635,6 +1641,59 @@ const Bank = {
     }
     if (item.last4 && !this.cardFor(item.last4)) d.cards.push(ptype === 'debt' ? { id: uid('card'), last4: item.last4, debtId: pid } : { id: uid('card'), last4: item.last4, accountId: pid });
     return m;
+  },
+  // Ingreso desde la bandeja: abre el formulario de ingreso (quincena / extraordinario / otro) con lo del aviso
+  incomePreset(item) {
+    const d = D(), np = Calc.nearestPayday(item.date), near = Math.abs(diffDays(np.date, item.date)) <= 4 && np.amount > 0 && Math.abs(item.amount - np.amount) <= np.amount * 0.35;
+    const [t, id] = String(this.payWithDefault(item)).split('|');
+    const acc = t === 'acc' && Data.get('accounts', id) ? id : (d.accounts.find(a => a.type === 'liquida') || d.accounts[0] || {}).id;
+    const kind = near || /n[oó]mina|sueldo|salario/i.test(item.raw + ' ' + item.subject) ? 'quincena' : 'otro';
+    return { _title: 'Registrar ingreso · ' + (item.bank || item.merchant || 'banco'), _inbox: item, _dup: true, type: 'ingreso', incomeKind: kind, date: item.date, amount: item.amount, forPayday: np.date, expected: np.amount, account: acc, category: kind === 'quincena' ? 'Nómina' : 'Otros ingresos', description: kind === 'quincena' ? 'Pago quincenal' : (item.merchant || 'Ingreso'), method: 'Transferencia', realized: true, notes: 'Aviso del banco' + (item.bank ? ' ' + item.bank : '') };
+  },
+  // Monto original del aviso del banco (nunca se pierde aunque registres solo una parte)
+  bankAmount(item) {
+    if (Number(item.origAmount) > 0) return item.origAmount;
+    const p = item.raw ? this.parse(item.raw, { subject: item.subject, date: item.date }) : null;
+    return p && p.amount > 0 ? p.amount : item.amount;
+  },
+  children(item) { return (D().inbox || []).filter(x => x.parentId === item.id); },
+  // Después de registrar: si se registró menos que lo del aviso, el resto queda en Por categorizar
+  afterPost(item, registered) {
+    const full = r2(item.amount), rest = r2(full - (Number(registered) || 0));
+    if (rest > 0.004) {
+      D().inbox.push(Object.assign({}, item, { id: uid('inb'), parentId: item.id, msgId: '', amount: rest, origAmount: rest, status: 'pendiente', movementId: undefined, postedAt: undefined, manual: false, auto: false, createdAt: new Date().toISOString(), merchant: item.merchant, note: 'Resto de un aviso registrado parcialmente' }));
+      item.amount = r2(registered); item.splitRest = rest;
+    }
+    return rest > 0.004 ? rest : 0;
+  },
+  // Movimientos creados desde un aviso (incluye las partes de un cargo dividido)
+  itemMovs(item) { return D().movements.filter(m => m.inboxId === item.id || m.id === item.movementId); },
+  // Regresa el aviso a "Por categorizar": borra lo que se creó desde él (si era un registro manual, solo lo desvincula)
+  unpost(item, keepManual) {
+    const d = D();
+    if (item.manual) { const mv = item.movementId && d.movements.find(m => m.id === item.movementId); if (mv) { if (keepManual) delete mv.inboxId; else d.movements = d.movements.filter(m => m.id !== mv.id); } }
+    else { const ids = new Set(this.itemMovs(item).map(m => m.id)); d.movements = d.movements.filter(m => !ids.has(m.id)); }
+    item.status = 'pendiente'; delete item.movementId; item.manual = false; item.auto = false; delete item.postedAt;
+    // Regresa el monto completo: se reintegran los restos que sigan pendientes; los ya categorizados se descuentan
+    const kids = this.children(item), pendKids = kids.filter(k => k.status === 'pendiente'), doneAmt = sum(kids.filter(k => k.status !== 'pendiente'), k => k.amount);
+    d.inbox = d.inbox.filter(x => !pendKids.includes(x));
+    item.amount = r2((item.parentId ? Number(item.origAmount) || item.amount : this.bankAmount(item)) - doneAmt); delete item.splitRest;
+  },
+  // Repara avisos de versiones anteriores donde el monto se sobrescribió al registrar solo una parte
+  repairAmounts() {
+    const d = D(); let fixed = 0;
+    (d.inbox || []).forEach(it => {
+      if (it.origAmount != null || it.parentId) return;
+      const full = this.bankAmount(it);
+      it.origAmount = full;
+      if (!(full > 0)) return;
+      if (it.status === 'pendiente' && full - it.amount > 0.004) { it.amount = full; fixed++; }
+      else if (it.status === 'registrado' && !it.manual) {
+        const reg = sum(this.itemMovs(it), m => m.amount);
+        if (reg > 0 && full - reg > 0.004 && !this.children(it).length) { it.amount = reg; this.afterPost(Object.assign(it, { amount: full }), reg); fixed++; }
+      }
+    });
+    return fixed;
   },
   pending() { return (D().inbox || []).filter(x => x.status === 'pendiente').sort((a, b) => a.date < b.date ? 1 : -1); },
 
@@ -1818,7 +1877,14 @@ function btn(label, action, data, cls) {
 }
 function emptyRow(cols, msg) { return '<tr><td colspan="' + cols + '" class="empty">' + msg + '</td></tr>'; }
 function accName(id) { const a = D().accounts.find(x => x.id === id); return a ? a.name : '—'; }
-function catOptions(includeEmpty) { const o = D().categories.map(c => ({ value: c.name, label: c.name })); return includeEmpty ? [{ value: '', label: 'Todas' }].concat(o) : o; }
+const INCOME_CATS = ['Nómina', 'Ingreso extraordinario', 'Otros ingresos'];
+// Tipo de categoría: ingreso o egreso (las de ingreso se reconocen por nombre si no se marcó)
+function catKind(c) { return c.kind === 'ingreso' || c.kind === 'gasto' ? c.kind : (INCOME_CATS.includes(c.name) || /ingreso|n[oó]mina|sueldo|salario|honorario/i.test(c.name) ? 'ingreso' : 'gasto'); }
+function catOptions(includeEmpty, kind, keep) {
+  const o = D().categories.filter(c => !kind || catKind(c) === kind || c.name === keep).map(c => ({ value: c.name, label: c.name }));
+  if (keep && !o.some(x => x.value === keep)) o.unshift({ value: keep, label: keep });
+  return includeEmpty ? [{ value: '', label: 'Todas' }].concat(o) : o;
+}
 function accOptions(filter) { return D().accounts.filter(a => !filter || filter(a)).map(a => ({ value: a.id, label: a.name + ' (' + ACC_TYPE_LABEL[a.type] + ')' })); }
 function download(filename, text, mime) {
   try {
@@ -1956,6 +2022,26 @@ const Modal = (function () {
   return { form, info, close, init };
 })();
 
+/* --- Dividir un gasto en varias categorías --- */
+function splitFields(showFn) {
+  const f = [{ name: 'split', label: 'Dividir en varias categorías (ej. 1,000 comida y 1,000 deudas)', type: 'checkbox', show: showFn }];
+  [1, 2, 3].forEach(i => { f.push({ name: 's' + i + 'cat', label: 'Parte ' + (i + 1) + ' · categoría', type: 'select', options: () => [{ value: '', label: '—' }].concat(catOptions(false, 'gasto')), show: v => showFn(v) && v.split && (i === 1 || v['s' + (i - 1) + 'cat']) }, { name: 's' + i + 'amt', label: 'Parte ' + (i + 1) + ' · monto', type: 'number', show: v => showFn(v) && v.split && (i === 1 || v['s' + (i - 1) + 'cat']) }); });
+  return f;
+}
+function splitParts(v) { return v.split ? [1, 2, 3].map(i => ({ category: v['s' + i + 'cat'], amount: Number(v['s' + i + 'amt']) || 0 })).filter(x => x.category && x.amount > 0) : []; }
+function splitCheck(v, total) {
+  if (!v.split) return null;
+  const parts = splitParts(v), used = sum(parts, x => x.amount);
+  if (!parts.length) return { s1cat: 'Elige al menos una categoría y monto para dividir' };
+  if (used >= total - 0.004) return { s1amt: 'Las partes deben sumar menos que el total (' + money(total) + '); el resto queda en la categoría principal' };
+  return null;
+}
+function splitPreview(v, total, mainCat) {
+  if (!v.split || !Number.isFinite(total)) return '';
+  const parts = splitParts(v), rest = r2(total - sum(parts, x => x.amount));
+  return '<div class="rows small"><div class="row"><span class="lbl">' + esc(mainCat || 'Categoría principal') + '</span><b class="num ' + (rest <= 0 ? 'neg' : '') + '">' + money(rest) + '</b></div>' + parts.map(x => '<div class="row"><span class="lbl">' + esc(x.category) + '</span><b class="num">' + money(x.amount) + '</b></div>').join('') + '<div class="row total"><span class="lbl">Total</span><b class="num">' + money(total) + '</b></div></div>';
+}
+
 /* --- Formularios de entidades --- */
 const Forms = {
   movement(existing, preset) {
@@ -1986,13 +2072,14 @@ const Forms = {
       { name: 'debtId', label: 'Deuda', type: 'select', required: true, options: debtOpts.length ? debtOpts : [{ value: '', label: 'No hay deudas registradas' }], show: v => v.type === 'pago_deuda' },
       { name: 'goalId', label: 'Meta de ahorro', type: 'select', options: goalOpts, show: v => v.type === 'ahorro' },
       { name: 'link', label: '¿Es el pago de un compromiso programado?', type: 'select', full: true, options: linkOpts, show: v => v.type === 'gasto', hint: 'Vincúlalo para marcar el compromiso como pagado y no contarlo dos veces.' },
-      { name: 'category', label: 'Categoría', type: 'select', required: true, options: () => catOptions(), show: v => v.type !== 'transferencia' },
+      { name: 'category', label: 'Categoría', type: 'select', required: true, options: () => catOptions(false, base.type === 'ingreso' ? 'ingreso' : 'gasto', isEdit ? existing.category : ''), show: v => v.type !== 'transferencia' },
       { name: 'subcategory', label: 'Subcategoría', type: 'text', placeholder: 'Opcional', show: v => v.type !== 'transferencia' },
       { name: 'description', label: 'Descripción', type: 'text', required: true, full: true, placeholder: 'Ej. Súper, comida, bono…' },
       { name: 'account', label: 'Cuenta', type: 'select', required: true, options: () => accOptions(), show: v => !isCredit(v) },
       { name: 'creditDebtId', label: 'Tarjeta (deuda) a la que se carga', type: 'select', required: true, options: debtOpts.length ? debtOpts : [{ value: '', label: 'Registra primero la tarjeta en Deudas' }], show: isCredit, hint: 'La compra aumenta el saldo de la deuda; no sale de tus cuentas.' },
       { name: 'toAccount', label: 'Cuenta destino', type: 'select', options: () => [{ value: '', label: '— Ninguna —' }].concat(accOptions()), show: v => v.type === 'transferencia' || v.type === 'ahorro' },
       { name: 'method', label: 'Método de pago', type: 'select', options: METHODS },
+      ...(isEdit ? [] : splitFields(v => v.type === 'gasto' && !v.link)),
       { name: 'realized', label: 'Ya se pagó / cobró (es dinero real)', type: 'checkbox', show: v => !isCredit(v), hint: 'Desmárcalo si solo lo estás registrando y el dinero aún no sale o no entra: quedará como “registrado pendiente” y no contará en tu disponible real hasta que lo confirmes.' },
       { name: 'notes', label: 'Notas', type: 'textarea', full: true }
     ];
@@ -2006,6 +2093,7 @@ const Forms = {
       title: preset && preset._title ? preset._title : (isEdit ? 'Editar movimiento' : 'Nuevo movimiento'),
       fields, values: base,
       onChange(v, changed, set) {
+        if (changed === 'type') { const sel = $('modalRoot').querySelector('select[name="category"]'), cur = sel ? sel.value : ''; if (sel) { const ops = catOptions(false, v.type === 'ingreso' ? 'ingreso' : 'gasto'); sel.innerHTML = ops.map(o => '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>').join(''); if (ops.some(o => o.value === cur)) sel.value = cur; } }
         if (changed === 'type' || changed === 'incomeKind' || changed === 'goalId') { const c = autoCat(v); if (c) set('category', c); if (v.type === 'ahorro' && changed === 'type') set('toAccount', 'acc_ahorro'); }
         if ((changed === 'date' || changed === 'incomeKind' || changed === 'type') && v.type === 'ingreso' && v.incomeKind === 'quincena' && isDate(v.date)) { const np = Calc.nearestPayday(v.date); set('forPayday', np.date); set('expected', np.amount); }
         if (changed === 'forPayday' && isDate(v.forPayday)) set('expected', payAmt(v.forPayday));
@@ -2018,6 +2106,7 @@ const Forms = {
           const sh = isDate(v.date) && isDate(v.forPayday) ? Calc.shiftLabel(v.forPayday, v.date) : '';
           return (sh ? '<div class="small" style="margin-bottom:6px">' + badge(sh, 'b-violet') + '</div>' : '') + '<div class="rows small"><div class="row"><span class="lbl">Esperado</span><b class="num">' + money(v.expected) + '</b></div><div class="row"><span class="lbl">Recibido</span><b class="num">' + money(v.amount) + '</b></div><div class="row"><span class="lbl">Ingreso ordinario</span><b class="num">' + money(ord) + '</b></div><div class="row"><span class="lbl">Ingreso extraordinario</span><b class="num pos">' + money(ex) + '</b></div><div class="row"><span class="lbl">Desviación</span><b class="num ' + (dev < 0 ? 'neg' : dev > 0 ? 'pos' : '') + '">' + money(dev, true) + '</b></div></div>';
         }
+        if (!isEdit && v.type === 'gasto' && !v.link && v.split) return splitPreview(v, v.amount, v.category);
         if (v.type === 'gasto' && v.link) {
           const c = cands.find(x => x.key === v.link);
           if (c) { const dev = Number.isFinite(v.amount) ? r2(c.amount - v.amount) : null; return '<div class="rows small"><div class="row"><span class="lbl">Programado · ' + esc(c.name) + ' (' + fmtDateS(c.date) + ')</span><b class="num">' + money(c.amount) + '</b></div><div class="row"><span class="lbl">Real</span><b class="num">' + (Number.isFinite(v.amount) ? money(v.amount) : '—') + '</b></div>' + (dev != null ? '<div class="row"><span class="lbl">Desviación vs programado</span><b class="num ' + (dev < 0 ? 'neg' : dev > 0 ? 'pos' : '') + '">' + money(dev, true) + '</b></div>' : '') + '</div>'; }
@@ -2034,6 +2123,8 @@ const Forms = {
           if (v.amount > avail + 0.004) return { amount: 'El pago excede el saldo de la deuda (' + money(avail) + ')' };
         }
         if (v.date < '2000-01-01') return { date: 'Fecha fuera de rango' };
+        if (preset && preset._inbox && v.amount > preset._inbox.amount + 0.004) return { amount: 'El aviso es por ' + money(preset._inbox.amount) + '; registra ese monto o menos (el resto queda en Por categorizar)' };
+        if (!isEdit && v.type === 'gasto' && !v.link) { const sc = splitCheck(v, v.amount); if (sc) return sc; }
         if (isCredit(v) && !d.debts.some(x => x.id === v.creditDebtId)) return { creditDebtId: 'Registra primero la tarjeta en Deudas' };
         if (v.type === 'ingreso' && v.incomeKind === 'quincena') {
           if (!isDate(v.forPayday)) return { forPayday: 'Elige la quincena' };
@@ -2067,7 +2158,12 @@ const Forms = {
         if (link) { const k = link.split('|'); if (k[0] === 'rec') { m.recurringId = k[1]; m.occDate = k[2]; } else if (k[0] === 'gp') m.goalPaymentId = k[1]; }
         if (isCredit(v)) m.creditDebtId = v.creditDebtId;
         m.status = isCredit(v) || v.realized ? 'realizado' : 'pendiente';
+        const inb = preset && preset._inbox;
+        if (inb) m.inboxId = inb.id; else if (isEdit && existing.inboxId) m.inboxId = existing.inboxId;
         Data.upsert('movements', m);
+        const pieces = !isEdit && m.type === 'gasto' && !link ? splitParts(v) : [];
+        if (pieces.length) { m.splitId = uid('split'); m.amount = r2(m.amount - sum(pieces, x => x.amount)); pieces.forEach(x => D().movements.push(Object.assign({}, m, { id: uid('mov'), category: x.category, subcategory: '', amount: r2(x.amount), description: m.description + ' · ' + x.category }))); }
+        if (inb) { inb.status = 'registrado'; inb.movementId = m.id; inb.postedAt = new Date().toISOString(); Bank.afterPost(inb, r2(v.amount)); }
         App.refresh();
         let msg = (isEdit ? 'Movimiento actualizado' : 'Movimiento registrado') + (m.status === 'pendiente' ? ' como pendiente (no cuenta en tu disponible real)' : '');
         if (m.incomeKind === 'quincena' && m.forPayday !== m.date) msg += ' · ' + Calc.shiftLabel(m.forPayday, m.date).toLowerCase() + ' (movido en el calendario)';
@@ -2085,7 +2181,7 @@ const Forms = {
       values: base,
       fields: [
         { name: 'name', label: 'Nombre', type: 'text', required: true, full: true },
-        { name: 'category', label: 'Categoría', type: 'select', required: true, options: () => catOptions() },
+        { name: 'category', label: 'Categoría', type: 'select', required: true, options: () => catOptions(false, 'gasto') },
         { name: 'amount', label: 'Monto por pago', type: 'number', required: true, min: 0.01, minMsg: 'El monto debe ser mayor a cero' },
         { name: 'frequency', label: 'Periodicidad', type: 'select', required: true, options: FREQS },
         { name: 'payDay', label: 'Día de pago', type: 'number', required: true, min: 1, max: 31, step: '1', integer: true, show: v => v.frequency !== 'semanal' && v.frequency !== 'personalizada', hint: 'Quincenal: se cobra este día y 15 días después.' },
@@ -2265,18 +2361,18 @@ const Forms = {
   category(existing) {
     const isEdit = !!existing;
     Modal.form({
-      title: isEdit ? 'Renombrar categoría' : 'Nueva categoría', values: { name: isEdit ? existing.name : '' },
-      fields: [{ name: 'name', label: 'Nombre', type: 'text', required: true, full: true }],
+      title: isEdit ? 'Editar categoría' : 'Nueva categoría', values: { name: isEdit ? existing.name : '', kind: isEdit ? catKind(existing) : 'gasto' },
+      fields: [{ name: 'name', label: 'Nombre', type: 'text', required: true, full: true }, { name: 'kind', label: 'Tipo', type: 'select', full: true, options: [{ value: 'gasto', label: 'Egreso (gastos, pagos, ahorro)' }, { value: 'ingreso', label: 'Ingreso (nómina, bonos, otros ingresos)' }], hint: 'Define en qué formularios aparece: los ingresos solo muestran categorías de ingreso y los gastos solo de egreso.' }],
       validate(v) { if (D().categories.some(c => c.name.toLowerCase() === v.name.toLowerCase() && (!isEdit || c.id !== existing.id))) return { name: 'Ya existe esa categoría' }; return null; },
       onSubmit(v) {
         const d = D();
         if (isEdit) {
           const old = existing.name;
-          existing.name = v.name;
+          existing.name = v.name; existing.kind = v.kind;
           d.movements.forEach(m => { if (m.category === old) m.category = v.name; });
           d.recurringExpenses.forEach(r => { if (r.category === old) r.category = v.name; });
           d.budgets.forEach(b => { if (b.category === old) b.category = v.name; });
-        } else d.categories.push({ id: uid('cat'), name: v.name });
+        } else d.categories.push({ id: uid('cat'), name: v.name, kind: v.kind });
         App.refresh(); Toast.show(isEdit ? 'Categoría renombrada' : 'Categoría creada', 'ok');
       }
     });
@@ -2286,7 +2382,7 @@ const Forms = {
     Modal.form({
       title: isEdit ? 'Editar partida · ' + existing.category : 'Nueva partida de presupuesto', values: Object.assign({ category: 'Transporte', period: 'mensual', amount: null, notes: '' }, existing || {}, preset || {}),
       fields: [
-        { name: 'category', label: 'Categoría', type: 'select', required: true, options: () => catOptions() },
+        { name: 'category', label: 'Categoría', type: 'select', required: true, options: () => catOptions(false, 'gasto') },
         { name: 'period', label: 'Se planea por', type: 'select', required: true, options: BUDGET_PERIODS },
         { name: 'amount', label: 'Monto base por periodo', type: 'number', required: true, min: 0, hint: 'Aplica a todos los periodos; puedes ajustar una semana o mes concreto desde la tabla.' },
         { name: 'notes', label: 'Notas', type: 'textarea', full: true }
@@ -2323,7 +2419,7 @@ const Forms = {
         const m = Bank.cashMovement({ payWith: v.payWith, date: v.date, amount: v.amount, description: v.description, notes: v.notes, status: v.realized ? 'realizado' : 'pendiente', inboxId: item ? item.id : (existing && existing.inboxId) });
         withUndo(() => {
           if (isEdit) { m.id = existing.id; m.createdAt = existing.createdAt; Data.upsert('movements', m); }
-          else if (item) { D().movements.push(m); item.status = 'registrado'; item.movementId = m.id; item.postedAt = new Date().toISOString(); }
+          else if (item) { D().movements.push(m); Bank.afterPost(item, m.amount); item.status = 'registrado'; item.movementId = m.id; item.postedAt = new Date().toISOString(); }
           else D().movements.push(m);
         }, (m.cashKind === 'disposicion' ? 'Disposición' : 'Retiro') + ' registrado · ' + money(m.amount) + ' a ' + cash.name);
       }
@@ -2370,19 +2466,21 @@ const Forms = {
         { name: 'name', label: 'Comercio', type: 'text', required: true, full: true, hint: [item.bank ? 'Banco: ' + item.bank : (item.from ? 'De: ' + item.from : ''), item.last4 ? 'Tarjeta ····' + item.last4 : ''].filter(Boolean).join(' · ') },
         { name: 'date', label: 'Fecha', type: 'date', required: true },
         { name: 'amount', label: 'Monto', type: 'number', required: true, min: 0.01 },
-        { name: 'category', label: 'Categoría', type: 'select', required: true, options: () => catOptions() },
+        { name: 'category', label: 'Categoría', type: 'select', required: true, options: () => catOptions(false, 'gasto') },
         { name: 'subcategory', label: 'Subcategoría', type: 'text', placeholder: 'Opcional' },
         { name: 'kind', label: '¿Qué tipo de cargo es?', type: 'select', full: true, options: [{ value: 'esporadica', label: 'Compra esporádica' }, { value: 'recurrente', label: 'Cargo recurrente (suscripción, servicio, mensualidad…)' }] },
         { name: 'recurringId', label: 'Gasto recurrente', type: 'select', options: recOpts, show: v => v.kind === 'recurrente', hint: 'Si ya existe, se marca como pagado; si no, se crea con este monto y día.' },
         { name: 'frequency', label: 'Periodicidad', type: 'select', options: FREQS.filter(f => f.value !== 'personalizada'), show: v => v.kind === 'recurrente' && !v.recurringId },
         { name: 'payWith', label: 'Se pagó con', type: 'select', full: true, options: payOpts, hint: 'Crédito: aumenta la deuda de la tarjeta. Débito: sale de la cuenta.' },
+      ].concat(splitFields(v => v.kind !== 'recurrente')).concat([
         { name: 'remember', label: 'Recordar esta categoría para ' + item.merchant, type: 'checkbox' },
-        { name: 'auto', label: 'Registrar automáticamente los próximos cargos de este comercio', type: 'checkbox', show: v => v.remember, hint: 'Los verás en “Procesados” con opción de anular.' }
-      ],
-      preview(v) { return v.kind === 'recurrente' ? '<span class="small">Quedará como compromiso ' + (v.recurringId ? 'pagado de ' + esc((d.recurringExpenses.find(r => r.id === v.recurringId) || {}).name || '') : 'nuevo: ' + esc(v.name) + ' · ' + money(v.amount || 0) + ' cada ' + (FREQ_LABEL[v.frequency] || '').toLowerCase().replace('mensual', 'mes') + ' el día ' + parts(isDate(v.date) ? v.date : today()).d) + '. Así entra a tu presupuesto, al calendario y al Disponible seguro.</span>' : ''; },
+        { name: 'auto', label: 'Registrar automáticamente los próximos cargos de este comercio', type: 'checkbox', show: v => v.remember && !v.split, hint: 'Los verás en la pestaña “Categorizados” con opción de regresarlos.' }
+      ]),
+      validate(v) { if (Number(v.amount) > item.amount + 0.004) return { amount: 'El aviso es por ' + money(item.amount) + '; no puedes registrar más' }; return splitCheck(v, Number(v.amount)); },
+      preview(v) { const rest = r2(item.amount - (Number(v.amount) || 0)), note = rest > 0.004 ? '<div class="small" style="margin-bottom:6px">' + badge('Registro parcial', 'b-violet') + ' Registras ' + money(v.amount) + ' de ' + money(item.amount) + '; los <b>' + money(rest) + '</b> restantes quedan en Por categorizar.</div>' : ''; if (v.split && v.kind !== 'recurrente') return note + splitPreview(v, Number(v.amount), v.category); if (note) return note; return v.kind === 'recurrente' ? '<span class="small">Quedará como compromiso ' + (v.recurringId ? 'pagado de ' + esc((d.recurringExpenses.find(r => r.id === v.recurringId) || {}).name || '') : 'nuevo: ' + esc(v.name) + ' · ' + money(v.amount || 0) + ' cada ' + (FREQ_LABEL[v.frequency] || '').toLowerCase().replace('mensual', 'mes') + ' el día ' + parts(isDate(v.date) ? v.date : today()).d) + '. Así entra a tu presupuesto, al calendario y al Disponible seguro.</span>' : ''; },
       onSubmit(v) {
-        const it = Object.assign(item, { date: v.date, amount: r2(v.amount) });
-        withUndo(() => { const m = Bank.post(it, { name: v.name, category: v.category, subcategory: v.subcategory, kind: v.kind, recurringId: v.recurringId, frequency: v.frequency, payWith: v.payWith, remember: v.remember, auto: v.remember && v.auto }); }, 'Cargo registrado' + (v.remember ? ' · la app recordará ' + v.name : ''));
+        const it = item, amt = r2(v.amount);
+        withUndo(() => { const m = Bank.post(it, { amount: amt, date: v.date, name: v.name, category: v.category, subcategory: v.subcategory, kind: v.kind, recurringId: v.recurringId, frequency: v.frequency, payWith: v.payWith, remember: v.remember, auto: v.remember && v.auto && !v.split, splits: v.kind === 'recurrente' ? [] : splitParts(v) }); const rest = Bank.afterPost(it, amt); if (rest) setTimeout(() => Toast.show('Quedan ' + money(rest) + ' de este aviso en Por categorizar', 'ok'), 1600); }, 'Cargo registrado' + (v.remember ? ' · la app recordará ' + v.name : ''));
       }
     });
   },
@@ -2447,7 +2545,7 @@ const Data = {
    ===================================================================== */
 const SECTIONS = [
   { id: 'dashboard', label: 'Inicio', icon: 'home', group: 'Día a día' },
-  { id: 'bandeja', label: 'Bandeja de cargos', icon: 'inbox', group: 'Día a día' },
+  { id: 'bandeja', label: 'Bandeja de cargos', icon: 'inbox', group: 'Día a día', tabs: [['pendientes', 'Por categorizar'], ['categorizados', 'Categorizados']] },
   { id: 'movimientos', label: 'Movimientos', icon: 'list', group: 'Día a día' },
   { id: 'presupuesto', label: 'Presupuesto', icon: 'target', group: 'Planear' },
   { id: 'salidas', label: 'Salidas', icon: 'out', group: 'Planear', tabs: [['recurrentes', 'Gastos recurrentes'], ['deudas', 'Deudas']] },
@@ -2465,7 +2563,7 @@ const ROUTES = {
   recurrentes: ['salidas', 'recurrentes'], deudas: ['salidas', 'deudas'], viaje: ['metas', 'viaje']
 };
 const ui = {
-  section: 'dashboard', tabs: { resumen: 'quincenal', salidas: 'recurrentes' },
+  section: 'dashboard', tabs: { resumen: 'quincenal', salidas: 'recurrentes', bandeja: 'pendientes' },
   weekStart: null, flowStart: null, resMonth: null, calMonth: null, calSel: null,
   dashMonth: null, dashWeek: null, dashCal: 'semana', dashScope: 'total', todayOpen: false,
   budMode: 'mes', budMonth: null, budWeek: null, budFrom: null, budTo: null,
@@ -2596,24 +2694,38 @@ const Views = {
   },
 
   /* ---------------- BANDEJA DE CARGOS ---------------- */
+  // Pestaña "Categorizados": revisa lo registrado desde avisos, edítalo, elimínalo o regrésalo a Por categorizar
+  bandejaDone(done) {
+    const reg = done.filter(x => x.status === 'registrado'), disc = done.filter(x => x.status === 'descartado');
+    const item = x => {
+      const movs = Bank.itemMovs(x), st = x.manual ? badge('Ya lo tenías registrado', 'b-violet') : x.auto ? badge('Automático', 'b-lime') : badge('Categorizado', 'b-ok');
+      return '<div class="inbox-item done-item" data-done="' + esc(x.id) + '"><span class="m-ic">' + esc((x.merchant || '?').slice(0, 1)) + '</span><div><div class="m-name">' + esc(x.merchant) + ' ' + st + (x.kind === 'abono' ? ' ' + badge('Ingreso', 'b-ok') : x.kind === 'efectivo' ? ' ' + badge('Efectivo', 'b-warn') : '') + '</div><div class="m-sub">' + fmtDateL(x.date) + (x.bank ? ' · ' + esc(x.bank) : '') + (x.last4 ? ' · ····' + esc(x.last4) : '') + '</div>' +
+        (movs.length ? '<div class="done-movs">' + movs.map(m => '<div class="done-mov"><span>' + esc(m.type === 'transferencia' ? 'Traspaso a ' + accName(m.toAccount) : m.category) + (m.recurringId ? ' · recurrente' : '') + (movs.length > 1 ? ' · parte' : '') + '</span><b class="num">' + money(m.amount) + '</b>' + btn('Editar', 'editMovement', { id: m.id }, 'sm ghost') + '</div>').join('') + '</div>' : '<div class="suggest muted">Sin movimiento vinculado</div>') + '</div>' +
+        '<div class="m-actions" style="text-align:right"><div class="m-amt num">' + money(x.amount) + '</div><div class="actions" style="justify-content:flex-end;margin-top:6px">' + btn(x.manual ? 'Desvincular' : 'Regresar a por categorizar', 'inboxRestore', { id: x.id }, 'sm') + (movs[0] ? btn('Eliminar', 'deleteMovement', { id: movs[0].id }, 'sm danger') : '') + '</div></div></div>';
+    };
+    let h = '<div class="card glass" id="doneCard"><div class="card-head"><h3>Categorizados · ' + reg.length + '</h3><span class="sub">si algo quedó mal, edítalo o regrésalo a Por categorizar</span></div>' + (reg.length ? reg.map(item).join('') : '<div class="empty">Aún no hay avisos categorizados.</div>') + '</div>';
+    if (disc.length) h += '<div class="card glass mt"><div class="card-head"><h3>Descartados · ' + disc.length + '</h3></div>' + disc.map(x => '<div class="list-item"><div class="li-main"><div class="li-title">' + esc(x.merchant) + '</div><div class="li-sub">' + fmtDate(x.date) + (x.bank ? ' · ' + esc(x.bank) : '') + '</div></div><div class="li-right"><b class="num">' + money(x.amount) + '</b>' + btn('Recuperar', 'inboxRestore', { id: x.id }, 'sm ghost') + '</div></div>').join('') + '</div>';
+    return h;
+  },
   bandeja() {
     const d = D(), pend = Bank.pending(), mail = d.settings.mail || {}, model = Bank.model();
-    const done = d.inbox.filter(x => x.status !== 'pendiente').sort((a, b) => (b.postedAt || b.createdAt || '') > (a.postedAt || a.createdAt || '') ? 1 : -1).slice(0, 15);
+    const done = d.inbox.filter(x => x.status !== 'pendiente').sort((a, b) => (b.postedAt || b.createdAt || '') > (a.postedAt || a.createdAt || '') ? 1 : -1);
     let h = '<div class="section-head"><div><h2>Bandeja de cargos</h2><p>Los avisos de tu banco llegan aquí. Categoriza un comercio una vez y los siguientes cargos de ese comercio se registran solos.</p></div><div class="actions">' +
       (Bank.configured() ? btn(icon('sync') + 'Revisar correo', 'syncMail', {}, 'primary') : btn(icon('mail') + 'Conectar correo', 'mailSetup', {}, 'primary')) + btn('Pegar notificación', 'pasteCharge') + '</div></div>';
     if (Bank.configured() && mail.lastError) h += '<div class="banner warn mt" id="mailError" style="margin-bottom:14px">' + icon('bell') + '<div><b>No se pudo revisar tu correo.</b> <span class="small">Causa probable: ' + esc(mail.lastError) + '</span></div></div>';
+    ui.tabs.bandeja = ui.tabs.bandeja || 'pendientes';
+    h += Nav.tabs('bandeja').replace('>Por categorizar<', '>Por categorizar · ' + pend.length + '<').replace('>Categorizados<', '>Categorizados · ' + done.filter(x => x.status === 'registrado').length + '<');
+    if (ui.tabs.bandeja === 'categorizados') return h + this.bandejaDone(done);
     h += '<div class="card glass"><div class="card-head"><h3>Por categorizar · ' + pend.length + '</h3>' + (Bank.configured() ? '<span class="sub">correo conectado' + (mail.lastSyncAt ? ' · revisado ' + fmtDate(mail.lastSyncAt.slice(0, 10)) : '') + ' · ' + '<button type="button" class="link-btn" data-action="mailSetup">ajustes</button></span>' : '') + '</div>' +
       (pend.length ? pend.map(x => { const sg = Bank.suggest(x, model), card = Bank.cardFor(x.last4);
-        return '<div class="inbox-item" data-inbox="' + esc(x.id) + '"><span class="m-ic">' + esc((x.merchant || '?').slice(0, 1)) + '</span><div><div class="m-name">' + esc(x.merchant) + (x.kind === 'abono' ? ' ' + badge('Abono', 'b-ok') : '') + (x.kind === 'efectivo' ? ' ' + badge(x.cashKind === 'disposicion' ? 'Disposición de efectivo' : 'Retiro de efectivo', 'b-warn') : '') + '</div><div class="m-sub">' + fmtDateL(x.date) + (x.last4 ? ' · tarjeta ····' + esc(x.last4) + (card ? '' : ' (nueva)') : '') + '</div>' +
-          (x.kind === 'efectivo' ? '<div class="suggest muted">Se registra como traspaso a tu cuenta Efectivo; no necesita categoría</div>' : sg ? '<div class="suggest">' + badge(sg.source === 'regla' ? 'Regla' : 'Sugerido ' + Math.round(sg.confidence * 100) + '%', sg.source === 'regla' ? 'b-lime' : 'b-violet') + ' ' + esc(sg.category) + (sg.kind === 'recurrente' ? ' · cargo recurrente' : '') + '</div>' : '<div class="suggest muted">Comercio nuevo: categorízalo una vez</div>') + '</div>' +
-          '<div class="m-actions" style="text-align:right"><div class="m-amt num">' + money(x.amount) + '</div><div class="actions" style="justify-content:flex-end;margin-top:6px">' + (x.kind === 'efectivo' ? btn('Pasar a Efectivo', 'inboxCash', { id: x.id }, 'sm primary') : (sg ? btn('Aceptar', 'inboxAccept', { id: x.id }, 'sm primary') : '') + btn(sg ? 'Cambiar' : 'Categorizar', 'inboxCategorize', { id: x.id }, 'sm' + (sg ? '' : ' primary'))) + btn('Descartar', 'inboxDiscard', { id: x.id }, 'sm ghost') + '</div></div></div>'; }).join('')
+        return '<div class="inbox-item" data-inbox="' + esc(x.id) + '"><span class="m-ic">' + esc((x.merchant || '?').slice(0, 1)) + '</span><div><div class="m-name">' + esc(x.merchant) + (x.kind === 'abono' ? ' ' + badge('Ingreso', 'b-ok') : '') + (x.kind === 'efectivo' ? ' ' + badge(x.cashKind === 'disposicion' ? 'Disposición de efectivo' : 'Retiro de efectivo', 'b-warn') : '') + '</div><div class="m-sub">' + fmtDateL(x.date) + (x.last4 ? ' · tarjeta ····' + esc(x.last4) + (card ? '' : ' (nueva)') : '') + '</div>' +
+          (x.kind === 'abono' ? '<div class="suggest muted">Ingreso: asócialo a tu quincena o regístralo como extraordinario</div>' : x.kind === 'efectivo' ? '<div class="suggest muted">Se registra como traspaso a tu cuenta Efectivo; no necesita categoría</div>' : sg ? '<div class="suggest">' + badge(sg.source === 'regla' ? 'Regla' : 'Sugerido ' + Math.round(sg.confidence * 100) + '%', sg.source === 'regla' ? 'b-lime' : 'b-violet') + ' ' + esc(sg.category) + (sg.kind === 'recurrente' ? ' · cargo recurrente' : '') + '</div>' : '<div class="suggest muted">Comercio nuevo: categorízalo una vez</div>') + '</div>' +
+          '<div class="m-actions" style="text-align:right"><div class="m-amt num">' + money(x.amount) + '</div><div class="actions" style="justify-content:flex-end;margin-top:6px">' + (x.kind === 'abono' ? btn('Registrar ingreso', 'inboxIncome', { id: x.id }, 'sm primary') + btn('Es un cargo', 'inboxFlip', { id: x.id }, 'sm ghost') : x.kind === 'efectivo' ? btn('Pasar a Efectivo', 'inboxCash', { id: x.id }, 'sm primary') : (sg ? btn('Aceptar', 'inboxAccept', { id: x.id }, 'sm primary') : '') + btn(sg ? 'Cambiar' : 'Categorizar', 'inboxCategorize', { id: x.id }, 'sm' + (sg ? '' : ' primary')) + btn('Es ingreso', 'inboxFlip', { id: x.id }, 'sm ghost') + btn('Es ingreso', 'inboxFlip', { id: x.id }, 'sm ghost')) + btn('Descartar', 'inboxDiscard', { id: x.id }, 'sm ghost') + '</div></div></div>'; }).join('')
         : '<div class="empty">' + (Bank.configured() ? 'No hay cargos nuevos. Toca “Revisar correo” para buscar avisos recientes.' : 'Conecta tu correo o pega el texto de una notificación de tu banco para empezar.') + '</div>') + '</div>';
     const sends = d.senders || [], unknown = Array.from(new Set(pend.filter(x => x.from && !x.senderId && !Bank.senderFor(x.from)).map(x => x.from))).slice(0, 3);
     h += '<div class="card glass mt" id="sendersCard"><div class="card-head"><h3>Remitentes de tus bancos · ' + sends.length + '</h3>' + btn(icon('plus') + 'Agregar remitente', 'newSender', {}, 'sm primary') + '</div><p class="small muted" style="margin-top:0">Cada correo de aviso se asocia a su banco y a la cuenta o tarjeta donde se registra el cargo. La app solo busca avisos de estos remitentes.</p>' +
       (sends.length ? '<div class="table-wrap"><table id="sendersTable"><thead><tr><th>Remitente</th><th>Banco</th><th>Se registra en</th><th></th></tr></thead><tbody>' + sends.map(x => '<tr data-sender="' + esc(x.id) + '"><td><b>' + esc(x.email) + '</b>' + (x.active === false ? ' ' + badge('Pausado', 'b-muted') : '') + '</td><td>' + esc(x.bank) + '</td><td>' + esc(Bank.payLabel(x.payWith)) + '</td><td><div class="row-actions">' + btn('Editar', 'editSender', { id: x.id }, 'sm') + btn('Quitar', 'deleteSender', { id: x.id }, 'sm danger') + '</div></td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">Aún no registras remitentes. Agrega el correo con el que tu banco te avisa de cada cargo (por ejemplo notificaciones@banregio.com).</div>') +
       (unknown.length ? '<div class="small mt">Llegaron avisos de remitentes sin asociar: ' + unknown.map(f => '<b>' + esc(f) + '</b> ' + btn('Asociar', 'newSender', { from: f }, 'sm ghost')).join(' ') + '</div>' : '') + '</div>';
-    if (done.length) h += '<div class="card glass mt"><div class="card-head"><h3>Procesados recientemente</h3></div>' + done.map(x => { const m = x.movementId && Data.get('movements', x.movementId);
-      return '<div class="list-item"><div class="li-main"><div class="li-title">' + esc(x.merchant) + ' ' + (x.status === 'descartado' ? badge('Descartado', 'b-muted') : x.manual ? badge('Ya lo tenías registrado', 'b-violet') : x.auto ? badge('Automático', 'b-lime') : badge('Registrado', 'b-ok')) + '</div><div class="li-sub">' + fmtDate(x.date) + (m ? ' · ' + esc(m.category) + (m.recurringId ? ' · recurrente' : '') : '') + '</div></div><div class="li-right"><b class="num">' + money(x.amount) + '</b>' + btn(x.status === 'descartado' ? 'Recuperar' : x.manual ? 'Desvincular' : 'Anular', 'inboxRestore', { id: x.id }, 'sm ghost') + '</div></div>'; }).join('') + '</div>';
     const rules = (d.rules || []).slice().sort((a, b) => (b.hits || 0) - (a.hits || 0));
     h += '<div class="grid g2 mt"><div class="card glass"><div class="card-head"><h3>Lo que la app ya aprendió</h3><span class="sub">' + rules.length + ' comercios</span></div>' +
       (rules.length ? '<div class="table-wrap"><table id="rulesTable"><thead><tr><th>Comercio</th><th>Categoría</th><th>Tipo</th><th>Automático</th><th></th></tr></thead><tbody>' + rules.map(r => '<tr><td><b>' + esc(r.merchant) + '</b><div class="tiny muted">' + (r.hits || 0) + ' cargos</div></td><td>' + esc(r.category) + '</td><td>' + (r.kind === 'recurrente' ? 'Recurrente' : 'Esporádica') + '</td><td><button type="button" class="switch ' + (r.auto ? 'on' : '') + '" data-action="toggleRuleAuto" data-id="' + esc(r.id) + '" aria-label="Registrar automáticamente" aria-pressed="' + !!r.auto + '"></button></td><td>' + btn('Olvidar', 'deleteRule', { id: r.id }, 'sm ghost') + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">Aún no hay comercios aprendidos. Cada vez que categorizas un cargo con “Recordar”, la app aprende.</div>') + '</div>';
@@ -2967,6 +3079,8 @@ const Views = {
       '<li><b>Registra los remitentes</b> (Bandeja → Agregar remitente): el correo con el que te avisa cada banco, el nombre del banco y la cuenta o tarjeta donde se registran sus cargos. La app solo busca avisos de esos remitentes y usa esa cuenta por defecto; si el aviso trae la terminación de una tarjeta ya conocida, manda la tarjeta.</li>' +
       '<li><b>¿Desde cuándo lee?</b> En Conectar correo eliges “Leer avisos desde” (vacío = últimos 45 días); después solo trae lo nuevo. Si ya registraste cargos a mano, no se duplican: un aviso con el mismo monto y fecha (±2 días) se vincula a tu movimiento y aparece en Procesados como “Ya lo tenías registrado”.</li>' +
       '<li><b>Retiros y disposiciones en efectivo</b> no son gastos: pasan como traspaso a tu cuenta <b>Efectivo</b> (un retiro sale de tu cuenta; una disposición sube la deuda de la tarjeta). Luego registras tus gastos en efectivo eligiendo esa cuenta. También desde “+” → Retiro de efectivo.</li>' +
+      '<li><b>Ingresos y gastos</b> se registran distinto: un ingreso (depósito, nómina) se asocia a su quincena aunque llegue antes o después, y el calendario lo muestra el día real; un gasto se categoriza y, si hace falta, se <b>divide</b> entre varias categorías (ej. 1,000 comida y 1,000 deudas). Cada formulario muestra solo las categorías de su tipo.</li>' +
+      '<li>En la pestaña <b>Categorizados</b> revisas todo lo registrado desde avisos: edítalo, elimínalo o regrésalo a Por categorizar. Eliminar un movimiento que vino de un aviso lo regresa a Por categorizar.</li>' +
       '<li>Sin conexión también funciona: toca <b>Pegar notificación</b> y pega el texto del correo o SMS (puedes pegar varios).</li>' +
       '<li>La primera vez que aparece un comercio, <b>categorízalo</b>: elige la categoría, si es <b>compra esporádica</b> o <b>cargo recurrente</b> y con qué tarjeta se pagó. Deja marcado “Recordar” y “Registrar automáticamente”.</li>' +
       '<li>Desde ahí, los cargos de ese comercio se registran solos; los recurrentes pagan su compromiso del mes (no se duplican). Para comercios nuevos, la app sugiere categoría por lo que ya aprendió: tocas <b>Aceptar</b>.</li>' +
@@ -3020,7 +3134,7 @@ const Views = {
     h += '<div class="card glass"><div class="card-head"><h3>Categorías</h3>' + btn('+ Categoría', 'newCategory', {}, 'sm primary') + '</div><div style="display:flex;flex-wrap:wrap;gap:8px">' +
       D().categories.map(c => '<span class="badge b-muted" style="padding:5px 6px 5px 11px;font-size:12.5px">' + esc(c.name) + ' <button type="button" class="link-btn" data-action="editCategory" data-id="' + esc(c.id) + '">editar</button> <button type="button" class="link-btn" style="color:var(--bad)" data-action="deleteCategory" data-id="' + esc(c.id) + '" aria-label="Eliminar ' + esc(c.name) + '">×</button></span>').join('') + '</div></div></div>';
     h += '<div class="card glass mt"><div class="card-head"><h3>Respaldos</h3><span class="sub">' + (Store.persistent ? 'Guardado en este navegador' : 'Almacenamiento local no disponible: exporta respaldos') + ' · esquema v' + SCHEMA_VERSION + ' · ' + D().movements.length + ' movimientos</span></div><div class="actions">' +
-      btn(icon('down') + 'Exportar respaldo (JSON)', 'exportJson', {}, 'primary') + btn(icon('up') + 'Importar respaldo', 'importJson') + btn('Revisar duplicados', 'findDuplicates') + btn('Restaurar datos iniciales', 'resetData', {}, 'danger') + '</div><p class="small muted mt">Los datos viven solo en este navegador. Exporta un respaldo con frecuencia, sobre todo antes de borrar datos del navegador o cambiar de dispositivo.</p></div>';
+      btn(icon('down') + 'Exportar respaldo (JSON)', 'exportJson', {}, 'primary') + btn(icon('up') + 'Importar respaldo', 'importJson') + btn('Copiar respaldo', 'copyBackup') + btn('Pegar respaldo', 'pasteBackup') + btn('Revisar duplicados', 'findDuplicates') + btn('Restaurar datos iniciales', 'resetData', {}, 'danger') + '</div><p class="small muted mt">Los datos viven solo en este navegador. Exporta un respaldo con frecuencia, sobre todo antes de borrar datos del navegador o cambiar de dispositivo.</p></div>';
     return h;
   }
 };
@@ -3299,15 +3413,22 @@ const Exporter = {
     if (file.size > 20 * 1024 * 1024) { Toast.show('El archivo es demasiado grande', 'err'); return; }
     const reader = new FileReader();
     reader.onerror = () => Toast.show('No se pudo leer el archivo', 'err');
-    reader.onload = () => {
-      let obj;
-      try { obj = JSON.parse(String(reader.result)); } catch (e) { Toast.show('El archivo no es un JSON válido', 'err'); return; }
-      const err = Schema.structure(obj);
-      if (err) { Toast.show('Respaldo inválido: ' + err, 'err'); return; }
-      const n = obj.movements.length;
-      Confirm.ask({ title: 'Importar respaldo', message: 'Contiene ' + n + ' movimientos, ' + obj.recurringExpenses.length + ' gastos recurrentes, ' + obj.debts.length + ' deudas y ' + obj[Schema.payCollection(obj)].length + ' pagos programados.\nReemplazará todos los datos actuales.', confirm: 'Importar y reemplazar', danger: true }).then(ok => { if (ok) Exporter.applyImport(obj); });
-    };
+    reader.onload = () => this.importText(String(reader.result));
     reader.readAsText(file);
+  },
+  importText(text) {
+      let obj;
+    try { obj = JSON.parse(String(text).trim()); } catch (e) { Toast.show('El respaldo no es un JSON válido (cópialo completo, desde { hasta })', 'err'); return; }
+    const err = Schema.structure(obj);
+    if (err) { Toast.show('Respaldo inválido: ' + err, 'err'); return; }
+    const n = obj.movements.length;
+    Confirm.ask({ title: 'Importar respaldo', message: 'Contiene ' + n + ' movimientos, ' + obj.recurringExpenses.length + ' gastos recurrentes, ' + obj.debts.length + ' deudas y ' + obj[Schema.payCollection(obj)].length + ' pagos programados.\nReemplazará todos los datos actuales.', confirm: 'Importar y reemplazar', danger: true }).then(ok => { if (ok) Exporter.applyImport(obj); });
+  },
+  // Respaldo como texto: para pasar datos entre dispositivos cuando no se pueden descargar archivos
+  copyText() {
+    const txt = JSON.stringify(D());
+    const show = () => Modal.info('Copiar respaldo', '<p class="small muted" style="margin-top:0">Selecciona todo el texto, cópialo y pégalo en Notas o mándatelo por mensaje. En el otro dispositivo usa Configuración → Pegar respaldo.</p><textarea id="backupText" readonly rows="8" style="width:100%;font-size:12px">' + esc(txt) + '</textarea>', true);
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(() => Toast.show('Respaldo copiado: pégalo en Notas o en un mensaje', 'ok'), show); else show();
   },
   applyImport(obj) {
     try {
@@ -3335,9 +3456,21 @@ const Actions = {
   newExpenseCat: ds => Forms.movement(null, { _title: 'Gasto · ' + ds.cat, type: 'gasto', category: ds.cat, description: ds.cat, date: isDate(ds.date) ? ds.date : today() }),
   editMovement: ds => { const m = Data.get('movements', ds.id); if (m) (m.cashKind ? Forms.cash(m) : Forms.movement(m)); },
   newCash: () => Forms.cash(),
+  inboxIncome: ds => { const it = (D().inbox || []).find(x => x.id === ds.id); if (it) Forms.movement(null, Bank.incomePreset(it)); },
+  inboxFlip: ds => { const it = (D().inbox || []).find(x => x.id === ds.id); if (!it) return; it.kind = it.kind === 'abono' ? 'cargo' : 'abono'; App.refresh(); Toast.show(it.kind === 'abono' ? 'Marcado como ingreso' : 'Marcado como cargo', 'ok'); },
   inboxCash: ds => { const it = (D().inbox || []).find(x => x.id === ds.id); if (it) Forms.cash(null, { _item: it }); },
   dupMovement: ds => { const m = Data.get('movements', ds.id); if (!m) return; const c = Object.assign({}, m); delete c.id; delete c.recurringId; delete c.occDate; delete c.goalPaymentId; delete c.link; c._dup = true; c._title = 'Duplicar movimiento'; Forms.movement(null, c); },
-  deleteMovement: async ds => { const m = Data.get('movements', ds.id); if (!m) return; if (!(await confirmDelete('el movimiento "' + m.description + '" por ' + money(m.amount)))) return; withUndo(() => { Data.remove('movements', m.id); (D().inbox || []).forEach(x => { if (x.movementId === m.id) { x.status = 'pendiente'; delete x.movementId; } }); }, 'Movimiento eliminado'); },
+  deleteMovement: async ds => {
+    const m = Data.get('movements', ds.id); if (!m) return;
+    const item = m.inboxId && (D().inbox || []).find(x => x.id === m.inboxId);
+    if (item) {
+      const n = Bank.itemMovs(item).length;
+      if (!(await Confirm.ask({ title: 'Eliminar movimiento', message: 'Viene de un aviso de tu banco (' + (item.merchant || '') + ' · ' + money(item.amount) + '). ' + (item.manual ? 'Se eliminará este movimiento' : n > 1 ? 'Se eliminarán sus ' + n + ' partes divididas' : 'Se eliminará') + ' y el aviso regresará a “Por categorizar” para registrarlo de nuevo.', confirm: 'Eliminar', danger: true }))) return;
+      return withUndo(() => Bank.unpost(item), 'Movimiento eliminado · el aviso regresó a Por categorizar');
+    }
+    if (!(await confirmDelete('el movimiento "' + m.description + '" por ' + money(m.amount)))) return;
+    withUndo(() => { Data.remove('movements', m.id); }, 'Movimiento eliminado');
+  },
   mvClear: () => { ui.mv = { period: 'todos', month: today().slice(0, 7), week: today(), from: '', to: '', date: '', type: '', category: '', account: '', status: '', q: '' }; App.render(); },
   /* Salidas: recurrentes */
   newRecurring: () => Forms.recurring(null),
@@ -3505,11 +3638,11 @@ const Actions = {
   inboxRestore: async ds => {
     const it = (D().inbox || []).find(x => x.id === ds.id); if (!it) return;
     if (it.manual) {
-      if (!(await Confirm.ask({ title: 'Desvincular aviso', message: 'Este aviso se reconoció como un movimiento que ya habías registrado a mano. Tu movimiento se conserva; el aviso volverá a la bandeja.', confirm: 'Desvincular' }))) return;
-      return withUndo(() => { const mv = it.movementId && Data.get('movements', it.movementId); if (mv) delete mv.inboxId; it.status = 'pendiente'; delete it.movementId; it.manual = false; }, 'El aviso volvió a la bandeja');
+      if (!(await Confirm.ask({ title: 'Desvincular aviso', message: 'Este aviso se reconoció como un movimiento que ya habías registrado a mano. Tu movimiento se conserva; el aviso volverá a Por categorizar.', confirm: 'Desvincular' }))) return;
+      return withUndo(() => Bank.unpost(it, true), 'El aviso volvió a Por categorizar');
     }
-    if (it.status === 'registrado' && !(await Confirm.ask({ title: 'Anular registro', message: 'Se eliminará el movimiento creado desde este aviso y el cargo volverá a la bandeja.', confirm: 'Anular', danger: true }))) return;
-    withUndo(() => { if (it.movementId) Data.remove('movements', it.movementId); it.status = 'pendiente'; delete it.movementId; it.auto = false; }, 'El cargo volvió a la bandeja');
+    if (it.status === 'registrado' && !(await Confirm.ask({ title: 'Regresar a Por categorizar', message: 'Se eliminará lo que se registró desde este aviso' + (Bank.itemMovs(it).length > 1 ? ' (' + Bank.itemMovs(it).length + ' partes)' : '') + ' y volverá a Por categorizar.', confirm: 'Regresar', danger: true }))) return;
+    withUndo(() => { if (it.status === 'registrado') Bank.unpost(it); else it.status = 'pendiente'; }, 'El aviso volvió a Por categorizar');
   },
   toggleRuleAuto: ds => { const r = (D().rules || []).find(x => x.id === ds.id); if (!r) return; r.auto = !r.auto; App.refresh(); Toast.show(r.merchant + (r.auto ? ': se registrará automáticamente' : ': te preguntaré antes de registrar'), 'ok'); },
   deleteRule: async ds => { const r = (D().rules || []).find(x => x.id === ds.id); if (!r) return; if (!(await Confirm.ask({ title: 'Olvidar ' + r.merchant, message: 'La app dejará de categorizar este comercio automáticamente. Los movimientos ya registrados no cambian.', confirm: 'Olvidar' }))) return; withUndo(() => { D().rules = D().rules.filter(x => x.id !== r.id); }, 'Regla olvidada'); },
@@ -3526,6 +3659,8 @@ const Actions = {
   },
   setupDone: ds => { D().meta.setup[ds.key] = true; App.refresh(); },
   setupHide: () => { D().meta.setup.hidden = true; App.refresh(); },
+  copyBackup: () => Exporter.copyText(),
+  pasteBackup: () => Modal.form({ title: 'Pegar respaldo', submitLabel: 'Importar', fields: [{ name: 'json', label: 'Pega aquí el texto del respaldo', type: 'textarea', required: true, full: true, maxLength: 20000000, hint: 'Lo obtienes en el otro dispositivo con Configuración → Copiar respaldo. Reemplazará todos los datos de este dispositivo.' }], onSubmit(v) { Modal.close(); Exporter.importText(v.json); } }),
   importJson: () => { const f = $('importFile'); f.value = ''; f.click(); },
   resetData: async () => {
     if (!(await Confirm.ask({ title: 'Restaurar datos iniciales', message: 'Se borrarán todos tus movimientos, cambios y configuraciones.', confirm: 'Continuar', danger: true }))) return;
@@ -3658,6 +3793,7 @@ const App = {
   },
   init() {
     const status = Store.load();
+    try { if (Bank.repairAmounts()) Store.save(); } catch (e) { console.warn(e); }
     Nav.build();
     Modal.init();
     this.bind();
