@@ -328,6 +328,7 @@ button.tile{cursor:pointer;font:inherit}
 .ledger tr.ledger-open td{background:var(--surface-2)}
 tr.ledger-row{cursor:pointer}tr.ledger-row:hover td{background:var(--surface-2)}
 .res-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:16px}
+.tile .t-rows{display:flex;flex-direction:column;gap:3px;font-size:12.5px;margin-top:4px}.tile .t-rows>span{display:flex;justify-content:space-between;gap:10px}.tile .t-rows .t-indent{opacity:.7;font-size:11.5px}
 .done-movs{margin-top:8px;display:flex;flex-direction:column;gap:4px}
 .done-mov{display:flex;align-items:center;gap:10px;font-size:13px}.done-mov span{flex:1;color:var(--muted)}
 .sheet-violet{background:var(--violet);border-radius:var(--r-xl);padding:22px;color:#fff}
@@ -1292,7 +1293,7 @@ const Calc = {
     d.budgets.forEach(p => {
       const spentToday = sum(this.movementsIn(t, t, m => m.type === 'gasto' && m.category === p.category), m => m.amount);
       const rem = r2(Math.max(0, this.partidaRange(p, t, winEnd) - spentToday));
-      if (rem > 0) commitments.push({ kind: 'partida', name: p.category + ' restante (' + daysLeft + (daysLeft === 1 ? ' día' : ' días') + ')', date: winEnd, amount: rem });
+      if (rem > 0) commitments.push({ kind: 'partida', cat: p.category, name: p.category + ' restante (' + daysLeft + (daysLeft === 1 ? ' día' : ' días') + ')', date: winEnd, amount: rem });
     });
     // Registrado pendiente de pagar (aún no sale dinero real): se aparta hasta el próximo ingreso
     this.pendingMovs(null, winEnd).forEach(m => {
@@ -1304,6 +1305,20 @@ const Calc = {
     const totalCommit = sum(commitments, x => x.amount), totalApart = sum(apartados, x => x.amount), totalSave = sum(savings, x => x.amount);
     const safe = r2(liquid - totalCommit - totalApart - totalSave);
     return { today: t, period: per, nextPayday: per.nextPayday, daysLeft, liquid, pendIn: pend.inflow, pendOut: pend.outflow, projected: r2(liquid + pend.net), commitments, apartados, savings, totalCommit, totalApart, totalSave, safe, perDay: r2(safe / Math.max(1, daysLeft)) };
+  },
+  // Comprometido de la quincena: lo pendiente (resta del disponible) y lo ya pagado (ya salió de bancos o efectivo)
+  committed(t) {
+    t = t || today();
+    const d = D(), s = this.safe(t), per = s.period, a = per.start, b = per.end, paid = [];
+    d.recurringExpenses.filter(r => r.active).forEach(r => this.occurrences(r, a, b).forEach(dt => { const m = this.occPayment(r, dt); if (m) paid.push({ kind: 'recurrente', name: r.name, date: dt, paidDate: m.date, amount: m.amount, acc: m.creditDebtId ? 'Tarjeta' : accName(m.account), movId: m.id, real: this.isReal(m) }); }));
+    d.goalPayments.forEach(p => { if (p.dueDate >= a && p.dueDate <= b) { const i = this.payInfo(p); if (i) paid.push({ kind: 'meta', name: this.payLabel(p), date: p.dueDate, paidDate: i.date, amount: i.amount, acc: i.mov ? accName(i.mov.account) : '', movId: i.mov ? i.mov.id : '', real: !i.mov || this.isReal(i.mov) }); } });
+    d.debts.forEach(db => { const x = this.debtPaid(db.id, a, b); if (x > 0) paid.push({ kind: 'deuda', name: 'Abono ' + db.name, date: b, paidDate: '', amount: r2(x), acc: '', real: true }); });
+    d.budgets.forEach(p => { const sp = sum(this.movementsIn(a, b, m => m.type === 'gasto' && m.category === p.category && this.isReal(m)), m => m.amount); if (sp > 0) paid.push({ kind: 'partida', name: p.category + ' (gastado de ' + money(this.partidaRange(p, a, b)) + ')', date: b, paidDate: '', amount: r2(sp), acc: '', real: true }); });
+    const pending = s.commitments.map(c => Object.assign({}, c, { group: 'compromiso' }))
+      .concat(s.apartados.map(x => ({ kind: 'apartado', name: 'Apartado · ' + x.name, date: x.date, amount: x.amount, detail: x.detail, group: 'apartado' })))
+      .concat(s.savings.map(x => ({ kind: 'ahorro', name: 'Ahorro · ' + x.name, date: b, amount: x.amount, group: 'ahorro' })));
+    const totalPending = r2(s.totalCommit + s.totalApart + s.totalSave), totalPaid = r2(sum(paid, x => x.amount));
+    return { per, start: a, end: b, liquid: s.liquid, pending, paid: paid.sort((x, y) => (x.paidDate || x.date) < (y.paidDate || y.date) ? -1 : 1), totalPending, totalPaid, free: s.safe, safe: s };
   },
   safeTone(v) { if (v < 0) return 'bad'; const q = Number(D().settings.q1Amount) || 1; return v < q * 0.05 ? 'warn' : 'ok'; },
 
@@ -2731,7 +2746,7 @@ const Views = {
           : '<div class="tile"><span class="t-ic">' + icon('check') + '</span><span class="t-title">Sin pagos próximos</span><span class="t-sub">Nada vence en los próximos 21 días</span></div>') +
       todayTile() +
       '</div>';
-    h += '<div class="mt">' + alertsCard() + setupCard() + '</div>';
+    h += '<div class="mt">' + alertsCard() + committedCard() + setupCard() + '</div>';
     // Mes elegido
     h += '<div class="section-head mt2"><div><h2>' + fmtMonth(ms) + (isCurM ? ' ' + badge('Mes actual', 'b-teal') : '') + '</h2><p>Ingresos, gasto y presupuesto del mes que elegiste.</p></div></div>';
     h += '<div class="grid g4">' +
@@ -3246,6 +3261,19 @@ function setupCard() {
 }
 
 /* --- Alertas: registrar lo real en días de cobro y pago --- */
+/* --- Comprometido de la quincena: pendiente (resta) y pagado (ya salió) --- */
+function committedCard() {
+  const c = Calc.committed(), lbl = { recurrente: 'Pago fijo', meta: 'Meta', deuda: 'Deuda', partida: 'Presupuesto', registrado: 'Registrado', apartado: 'Apartado', ahorro: 'Ahorro' };
+  const act = x => x.kind === 'recurrente' ? btn('Pagar', 'payRecurring', { id: x.ref, date: x.date }, 'sm primary') : x.kind === 'meta' ? btn('Pagar', 'payGoalPay', { id: x.ref }, 'sm primary') : x.kind === 'deuda' ? btn('Abonar', 'payDebt', { id: x.ref }, 'sm primary') : x.kind === 'registrado' ? btn('Marcar pagado', 'confirmMov', { id: x.ref }, 'sm primary') : x.kind === 'partida' ? btn('Registrar gasto', 'newMovementCat', { category: x.cat }, 'sm') : '';
+  const open = !!ui.commitOpen;
+  let h = '<div class="card glass" id="committedCard" style="margin-bottom:16px"><div class="card-head"><h3>Comprometido · ' + fmtDateS(c.start) + ' – ' + fmtDateS(c.end) + '</h3><button type="button" class="link-btn" data-action="toggleCommit">' + (open ? 'Ocultar' : 'Ver detalle') + '</button></div>' +
+    '<div class="grid g3">' + kpi('Pendiente', '−' + money(c.totalPending), c.pending.length + ' partidas') + kpi('Pagado', money(c.totalPaid), c.paid.length + ' pagos', 'ok') + kpi('Libre', money(c.free), 'disponible real − pendiente', c.free < 0 ? 'bad' : 'ok') + '</div>';
+  if (open) {
+    h += '<div class="small muted mt">Pendiente (se resta de tu disponible)</div>' + (c.pending.length ? c.pending.map(x => '<div class="list-item"><div class="li-main"><div class="li-title">' + badge(lbl[x.kind] || x.kind, x.overdue ? 'b-bad' : 'b-muted') + ' ' + esc(x.name) + '</div><div class="li-sub">' + fmtDateL(x.date) + (x.overdue ? ' · vencido' : '') + (x.detail ? ' · ' + esc(x.detail) : '') + '</div></div><div class="li-right"><b class="num">' + money(x.amount) + '</b>' + act(x) + '</div></div>').join('') : '<div class="empty">Nada pendiente.</div>');
+    h += '<div class="small muted mt">Pagado esta quincena (ya salió de tus cuentas o efectivo)</div>' + (c.paid.length ? c.paid.map(x => '<div class="list-item"><div class="li-main"><div class="li-title">' + badge('Pagado', 'b-ok') + ' ' + esc(x.name) + '</div><div class="li-sub">' + (x.paidDate ? 'pagado el ' + fmtDateS(x.paidDate) : 'en la quincena') + (x.acc ? ' · ' + esc(x.acc) : '') + '</div></div><div class="li-right"><b class="num">' + money(x.amount) + '</b>' + (x.movId ? btn('Ver', 'editMovement', { id: x.movId }, 'sm ghost') : '') + '</div></div>').join('') : '<div class="empty">Aún no hay pagos esta quincena.</div>');
+  }
+  return h + '</div>';
+}
 function alertsCard() {
   const al = Calc.alerts();
   if (!al.length) return '';
@@ -3327,10 +3355,14 @@ function availableTile(sf, ws, we, ms, me) {
   const scope = ui.dashScope || 'total';
   if (scope === 'total') {
     const total = Calc.liquid(), pf = Calc.pendingFlows(), bal = Calc.balances(), cashIds = D().accounts.filter(a => a.type === 'liquida' && (a.id === 'acc_efectivo' || /efectivo/i.test(a.name))).map(a => a.id), cashAmt = r2(sum(cashIds, id => bal[id] || 0));
-    const split = '<span class="t-sub" id="dashCash">En bancos <b class="num">' + money(r2(total - cashAmt)) + '</b> · Efectivo <b class="num">' + money(cashAmt) + '</b></span>';
-    const pendLine = (pf.inflow || pf.outflow) ? '<span class="t-sub" id="dashPending">Registrado sin confirmar: por cobrar <b class="num">+' + money(pf.inflow) + '</b> · por pagar <b class="num">−' + money(pf.outflow) + '</b> → proyectado <b class="num">' + money(r2(total + pf.net)) + '</b></span>' : '';
-    return '<button type="button" class="tile lime' + (total < 0 ? ' bad' : '') + '" id="dashSafe" data-action="safeDetail"><span class="t-ic">' + icon('shield') + '</span><span class="t-sub">Disponible real · lo ya cobrado menos lo ya pagado</span><span class="t-big num" id="dashSafeValue">' + money(total) + '</span>' + split + pendLine + '<span class="t-sub">Seguro para gastar hasta tu próximo cobro (' + fmtDateS(sf.nextPayday) + '): <b class="num">' + money(sf.safe) + '</b> · ver cálculo</span></button>';
+    const cm = Calc.committed();
+    const pendLine = (pf.inflow || pf.outflow) ? '<span class="t-sub" id="dashPending">Registrado sin confirmar: por cobrar <b class="num">+' + money(pf.inflow) + '</b> · por pagar <b class="num">−' + money(pf.outflow) + '</b></span>' : '';
+    return '<button type="button" class="tile lime' + (cm.free < 0 ? ' bad' : '') + '" id="dashSafe" data-action="safeDetail"><span class="t-ic">' + icon('shield') + '</span>' +
+      '<span class="t-sub">Libre para gastar · después de lo comprometido hasta tu cobro del ' + fmtDateS(cm.per.nextPayday) + '</span><span class="t-big num" id="dashSafeValue">' + money(cm.free) + '</span>' +
+      '<span class="t-rows" id="dashBreak"><span><span>Disponible real</span><b class="num" id="dashReal">' + money(total) + '</b></span><span class="t-indent"><span>En bancos ' + money(r2(total - cashAmt)) + ' · Efectivo ' + money(cashAmt) + '</span></span><span><span>Comprometido pendiente</span><b class="num" id="dashCommitted">−' + money(cm.totalPending) + '</b></span>' + (cm.totalPaid ? '<span class="t-indent"><span>Ya pagado esta quincena ' + money(cm.totalPaid) + '</span></span>' : '') + '</span>' +
+      pendLine + '<span class="t-sub">ver cálculo</span></button>';
   }
+
   const a = scope === 'semana' ? ws : ms, b = scope === 'semana' ? we : me;
   const sm = Calc.periodSummary(a, b), bud = Calc.budget(a, b);
   const outflow = r2(sm.spent - sm.cardSpent + sm.debtPaid + sm.saved);
@@ -3657,6 +3689,8 @@ const Actions = {
     const m = Data.get('movements', ds.id), acc = Data.get('accounts', ds.acc); if (!m || !acc) return;
     withUndo(() => { delete m.creditDebtId; m.account = acc.id; if (m.type === 'gasto') m.method = 'Débito'; if (m.cashKind === 'disposicion') m.cashKind = 'retiro'; m.status = 'realizado'; }, 'Movido a ' + acc.name + ': ya descuenta de su saldo');
   },
+  toggleCommit: () => { ui.commitOpen = !ui.commitOpen; App.render(); },
+  newMovementCat: ds => Forms.movement(null, { type: 'gasto', category: ds.category || 'Otros', description: ds.category || '' }),
   resAccount: ds => { ui.res.acc = ds.ref; ui.tabs.resumen = 'estado'; App.render(); window.scrollTo(0, 0); },
   /* Cuentas y categorías */
   newAccount: () => Forms.account(null),
@@ -3828,8 +3862,8 @@ const App = {
     try {
       const sf = Calc.safe(), tone = Calc.safeTone(sf.safe);
       const total = Calc.liquid();
-      $('topDs').innerHTML = '<small>Disponible real</small><b class="num" style="color:var(--' + (total < 0 ? 'bad' : 'text') + ')">' + money(total) + '</b>';
-      $('topDs').title = 'Disponible real (ya cobrado − ya pagado): ' + money(total) + ' · seguro hasta el ' + fmtDate(sf.nextPayday) + ': ' + money(sf.safe);
+      $('topDs').innerHTML = '<small>Libre</small><b class="num" style="color:var(--' + (sf.safe < 0 ? 'bad' : 'text') + ')">' + money(sf.safe) + '</b>';
+      $('topDs').title = 'Disponible real ' + money(total) + ' − comprometido ' + money(r2(total - sf.safe)) + ' = libre ' + money(sf.safe) + ' (hasta el ' + fmtDate(sf.nextPayday) + ')';
       const n = Calc.alerts().length;
       $('alertBtn').hidden = !n; $('alertCount').textContent = n; $('alertBtn').title = n + (n === 1 ? ' registro pendiente' : ' registros pendientes') + ' (cobros y pagos)';
       $('navAlerts').hidden = !n; $('navAlerts').textContent = n;
